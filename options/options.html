@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Know Ur Limit - Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="options-container">
+    <header class="options-header">
+      <div class="brand">
+        <div class="logo">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#38bdf8" stroke-width="2">
+            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+            <circle cx="12" cy="12" r="4" fill="#38bdf8"/>
+          </svg>
+        </div>
+        <div>
+          <h1>Know Ur Limit</h1>
+          <p class="subtitle">AI Chatbot Quota Tracker & Rate Limit Reset Hub</p>
+        </div>
+      </div>
+      <button id="saveTopBtn" class="btn btn-primary">Save Settings</button>
+    </header>
+
+    <div class="options-content">
+      <!-- Section 1: Notifications & Badges -->
+      <section class="card">
+        <h2>Notifications & Alerts</h2>
+        <p class="section-desc">Configure system alerts when rate limits are detected or restored.</p>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <label for="notifyOnReset">Notify when Limit Resets</label>
+            <span class="setting-desc">Send desktop notification when Claude, ChatGPT or Gemini becomes available again.</span>
+          </div>
+          <div class="setting-control">
+            <input type="checkbox" id="notifyOnReset" class="toggle-switch">
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <label for="notifyOnLimit">Notify on Limit Hit</label>
+            <span class="setting-desc">Send desktop notification immediately when a rate limit (HTTP 429) is triggered.</span>
+          </div>
+          <div class="setting-control">
+            <input type="checkbox" id="notifyOnLimit" class="toggle-switch">
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <label for="badgeMode">Extension Badge Display</label>
+            <span class="setting-desc">Format of the counter displayed over the extension icon in browser toolbar.</span>
+          </div>
+          <div class="setting-control">
+            <select id="badgeMode" class="form-select">
+              <option value="countdown">Cooldown Timer (e.g. 15m)</option>
+              <option value="count">Count of Limited Bots</option>
+              <option value="off">Disabled</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <label for="showFloatingHud">In-Page Floating Status HUD</label>
+            <span class="setting-desc">Display a minimal floating pill widget directly on claude.ai and chatgpt.com.</span>
+          </div>
+          <div class="setting-control">
+            <input type="checkbox" id="showFloatingHud" class="toggle-switch">
+          </div>
+        </div>
+
+        <div class="test-action-row">
+          <button id="testNotifyBtn" class="btn btn-secondary">Test Desktop Notification</button>
+        </div>
+      </section>
+
+      <!-- Section 2: Quota & Model Tiers -->
+      <section class="card">
+        <h2>Custom Quotas & Rolling Windows</h2>
+        <p class="section-desc">Customize message allowances and rolling cooldown windows per provider.</p>
+
+        <!-- ChatGPT -->
+        <div class="bot-config-item">
+          <div class="bot-config-header">
+            <span class="bot-badge gpt">ChatGPT</span>
+            <span class="bot-desc">Default: Plus Tier (80 messages / 3 hours)</span>
+          </div>
+          <div class="fields-grid">
+            <div class="field">
+              <label>Plan / Tier</label>
+              <select id="tier_chatgpt" class="form-select">
+                <option value="free">Free Tier (~10 msgs / 3h)</option>
+                <option value="plus">ChatGPT Plus (~80 msgs / 3h)</option>
+                <option value="team">ChatGPT Team (~100 msgs / 3h)</option>
+                <option value="pro">ChatGPT Pro (~300 msgs / 3h)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Max Prompts in Window</label>
+              <input type="number" id="max_chatgpt" class="form-input" min="1" max="1000">
+            </div>
+            <div class="field">
+              <label>Window Duration (Minutes)</label>
+              <input type="number" id="window_chatgpt" class="form-input" min="1" max="1440">
+            </div>
+          </div>
+        </div>
+
+        <!-- Claude -->
+        <div class="bot-config-item">
+          <div class="bot-config-header">
+            <span class="bot-badge claude">Claude</span>
+            <span class="bot-desc">Default: Pro Tier (~45 messages / 5 hours)</span>
+          </div>
+          <div class="fields-grid">
+            <div class="field">
+              <label>Plan / Tier</label>
+              <select id="tier_claude" class="form-select">
+                <option value="free">Free Tier (~12 msgs / 5h)</option>
+                <option value="pro">Claude Pro (~45 msgs / 5h)</option>
+                <option value="team">Claude Team (~90 msgs / 5h)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Max Prompts in Window</label>
+              <input type="number" id="max_claude" class="form-input" min="1" max="1000">
+            </div>
+            <div class="field">
+              <label>Window Duration (Minutes)</label>
+              <input type="number" id="window_claude" class="form-input" min="1" max="1440">
+            </div>
+          </div>
+        </div>
+
+        <!-- Gemini -->
+        <div class="bot-config-item">
+          <div class="bot-config-header">
+            <span class="bot-badge gemini">Gemini</span>
+            <span class="bot-desc">Google One AI Premium / Standard</span>
+          </div>
+          <div class="fields-grid">
+            <div class="field">
+              <label>Plan / Tier</label>
+              <select id="tier_gemini" class="form-select">
+                <option value="free">Standard (Free)</option>
+                <option value="advanced">Gemini Advanced</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Daily Cap (Prompts)</label>
+              <input type="number" id="max_gemini" class="form-input" min="1" max="1000">
+            </div>
+            <div class="field">
+              <label>Window Duration (Minutes)</label>
+              <input type="number" id="window_gemini" class="form-input" min="1" max="1440">
+            </div>
+          </div>
+        </div>
+
+        <!-- DeepSeek -->
+        <div class="bot-config-item">
+          <div class="bot-config-header">
+            <span class="bot-badge deepseek">DeepSeek</span>
+            <span class="bot-desc">DeepSeek V3 / R1 Web</span>
+          </div>
+          <div class="fields-grid">
+            <div class="field">
+              <label>Plan / Tier</label>
+              <select id="tier_deepseek" class="form-select">
+                <option value="free">Free Tier</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Daily Cap (Prompts)</label>
+              <input type="number" id="max_deepseek" class="form-input" min="1" max="1000">
+            </div>
+            <div class="field">
+              <label>Window Duration (Minutes)</label>
+              <input type="number" id="window_deepseek" class="form-input" min="1" max="1440">
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section 3: History & Data -->
+      <section class="card">
+        <h2>Data & Activity Log</h2>
+        <p class="section-desc">Manage locally stored prompt metrics and view recent events.</p>
+
+        <div class="data-actions-row">
+          <button id="exportJsonBtn" class="btn btn-secondary">Export Data (JSON)</button>
+          <button id="clearDataBtn" class="btn btn-danger">Clear All Data</button>
+        </div>
+
+        <div class="history-table-container">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Provider</th>
+                <th>Event</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody id="historyTableBody">
+              <tr><td colspan="4" class="empty-cell">No recent events recorded.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- Status Toast -->
+    <div id="saveToast" class="toast hidden">Settings saved successfully!</div>
+  </div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>
