@@ -47,12 +47,12 @@ Works on **Google Chrome**, **Brave**, **Microsoft Edge**, **Arc**, **Opera**, a
 
 ### Step 3: Load Unpacked Extension
 1. Click the **"Load unpacked"** button in the top-left.
-2. Select the directory:
+2. Select the repository directory:
    ```
-   ai-usage-limits-extension
+   know-ur-limit
    ```
-3. The extension **"AI Limits Hub - ChatGPT, Claude, Gemini Monitor"** will appear in your extensions list.
-4. Click the puzzle icon 🧩 in your browser toolbar and click the **Pin** 📌 icon next to **AI Limit Hub** to keep it readily visible.
+3. The extension **"Know Ur Limit - AI Usage & Rate Limit Tracker"** will appear in your extensions list.
+4. Click the puzzle icon 🧩 in your browser toolbar and click the **Pin** 📌 icon next to **Know Ur Limit** to keep it readily visible.
 
 ---
 
