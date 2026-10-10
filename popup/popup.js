@@ -3,7 +3,7 @@
  */
 
 import { BOTS, STATUS } from '../shared/constants.js';
-import { getAllBotStates, clearLimit, simulateLimit } from '../shared/storage.js';
+import { getAllBotStates, clearLimit, simulateLimit, updateBotCustomLimit } from '../shared/storage.js';
 
 let currentStates = {};
 
@@ -56,7 +56,7 @@ async function renderDashboard() {
       chipText = 'Limited';
       chipClass = 'limited';
     } else if (state.status === STATUS.APPROACHING || pct >= 80) {
-      chipText = 'Near Limit';
+      chipText = `${pct}% Used`;
       chipClass = 'approaching';
     }
 
@@ -112,6 +112,12 @@ async function renderDashboard() {
             <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/>
           </svg>
           Open Chat
+        </button>
+        <button class="btn-config" data-config-bot="${botId}" title="Customize limit for ${botDef.name}">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          Limit
         </button>
         ${isLimited ? `<button class="btn-clear" data-clear-bot="${botId}" title="Manually clear limit">Clear</button>` : ''}
       </div>
@@ -206,6 +212,78 @@ function bindCardActions() {
       await renderDashboard();
     });
   });
+
+  // Customize Limit
+  document.querySelectorAll('[data-config-bot]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      const botId = e.currentTarget.dataset.configBot;
+      openCustomModal(botId);
+    });
+  });
+}
+
+let currentEditingBotId = null;
+
+function openCustomModal(botId) {
+  currentEditingBotId = botId;
+  const botDef = BOTS[botId];
+  const state = currentStates[botId] || {};
+  if (!botDef) return;
+
+  const modal = document.getElementById('customModal');
+  const title = document.getElementById('customModalTitle');
+  const tierSelect = document.getElementById('customTierSelect');
+  const maxInput = document.getElementById('customMaxInput');
+  const winInput = document.getElementById('customWindowInput');
+
+  title.textContent = `Customize ${botDef.name} Limit`;
+  maxInput.value = state.maxPrompts || 80;
+  winInput.value = state.windowMinutes || 180;
+
+  // Populate tiers
+  tierSelect.innerHTML = '';
+  for (const [tKey, tDef] of Object.entries(botDef.tiers)) {
+    const opt = document.createElement('option');
+    opt.value = tKey;
+    opt.textContent = `${tDef.label} (Default: ${tDef.defaultMax} msgs / ${tDef.windowMinutes}m)`;
+    if (tKey === state.tier) opt.selected = true;
+    tierSelect.appendChild(opt);
+  }
+
+  tierSelect.onchange = () => {
+    const selectedTier = tierSelect.value;
+    const tDef = botDef.tiers[selectedTier];
+    if (tDef) {
+      maxInput.value = tDef.defaultMax;
+      winInput.value = tDef.windowMinutes;
+    }
+  };
+
+  modal.classList.remove('hidden');
+}
+
+function setupCustomLimitModal() {
+  const modal = document.getElementById('customModal');
+  const cancelBtn = document.getElementById('cancelCustomBtn');
+  const saveBtn = document.getElementById('saveCustomBtn');
+  const tierSelect = document.getElementById('customTierSelect');
+  const maxInput = document.getElementById('customMaxInput');
+  const winInput = document.getElementById('customWindowInput');
+
+  cancelBtn.addEventListener('click', () => {
+    modal.classList.add('hidden');
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    if (!currentEditingBotId) return;
+    const maxPrompts = parseInt(maxInput.value, 10) || 50;
+    const windowMinutes = parseInt(winInput.value, 10) || 180;
+    const tier = tierSelect.value;
+
+    await updateBotCustomLimit(currentEditingBotId, { maxPrompts, windowMinutes, tier });
+    modal.classList.add('hidden');
+    await renderDashboard();
+  });
 }
 
 // Simulation Modal Setup
@@ -254,4 +332,5 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   setupSimulationModal();
+  setupCustomLimitModal();
 });

@@ -77,6 +77,8 @@ export const STATUS = {
 export const DEFAULT_SETTINGS = {
   notifyOnReset: true,
   notifyOnLimit: true,
+  notifyOnApproaching: true,
+  warningThresholdPercent: 85, // Alert user when reaching 85% of quota
   badgeMode: 'countdown', // 'countdown' | 'count' | 'off'
   showFloatingHud: true,
   soundEnabled: false,

@@ -52,6 +52,27 @@
 
         <div class="setting-row">
           <div class="setting-info">
+            <label for="notifyOnApproaching">Notify when Approaching Limit</label>
+            <span class="setting-desc">Send desktop alert before hitting the limit so you can pace queries or switch models.</span>
+          </div>
+          <div class="setting-control">
+            <input type="checkbox" id="notifyOnApproaching" class="toggle-switch">
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <label for="warningThresholdPercent">Warning Alert Threshold</label>
+            <span class="setting-desc">Trigger notification when usage reaches this percentage (e.g. 85%).</span>
+          </div>
+          <div class="setting-control threshold-wrapper">
+            <input type="range" id="warningThresholdPercent" min="50" max="95" step="5" value="85" class="slider-input">
+            <span id="thresholdDisplay" class="threshold-badge">85%</span>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
             <label for="badgeMode">Extension Badge Display</label>
             <span class="setting-desc">Format of the counter displayed over the extension icon in browser toolbar.</span>
           </div>

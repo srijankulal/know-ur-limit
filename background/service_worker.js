@@ -11,6 +11,7 @@ import {
   clearLimit,
   updateBotPlan,
   updateBotHeartbeat,
+  updateBotCustomLimit,
   simulateLimit,
   getSettings,
   clearAllData
@@ -128,7 +129,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
       switch (action) {
         case 'PROMPT_SENT': {
-          const state = await recordPromptSent(data.botId, data.model);
+          const result = await recordPromptSent(data.botId, data.model);
+          const state = result?.state || result;
+
+          if (result?.approachingTriggered) {
+            const settings = await getSettings();
+            const botDef = BOTS[data.botId];
+            if (settings.notifyOnApproaching !== false && botDef) {
+              const count = state.prompts.length;
+              const max = state.maxPrompts;
+              const pct = result.percentage || Math.round((count / max) * 100);
+              const remaining = result.remaining !== undefined ? result.remaining : Math.max(0, max - count);
+              chrome.notifications.create(`notify_approaching_${data.botId}_${Date.now()}`, {
+                type: 'basic',
+                iconUrl: '../icons/icon128.png',
+                title: `⚠️ ${botDef.name} Limit Warning (${pct}%)`,
+                message: `You've used ${count}/${max} messages. Only ${remaining} prompts left before cooldown. Click to customize limits.`,
+                priority: 2
+              });
+            }
+          }
+
+          await updateExtensionBadge();
+          await broadcastStateUpdate();
+          sendResponse({ success: true, state });
+          break;
+        }
+
+        case 'UPDATE_CUSTOM_LIMIT': {
+          const state = await updateBotCustomLimit(data.botId, data);
           await updateExtensionBadge();
           await broadcastStateUpdate();
           sendResponse({ success: true, state });
@@ -224,4 +253,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })();
 
   return true; // Keep message channel open for async response
+});
+
+// Open Options Page when notification is clicked so user can customize limits
+chrome.notifications.onClicked.addListener((notificationId) => {
+  if (chrome.runtime.openOptionsPage) {
+    chrome.runtime.openOptionsPage();
+  }
 });

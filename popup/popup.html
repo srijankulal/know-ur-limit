@@ -100,6 +100,36 @@
     </div>
   </div>
 
+  <!-- Customize Limit Modal -->
+  <div id="customModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3 id="customModalTitle">Customize Quota Limits</h3>
+      <p class="modal-desc">Set custom message caps and rolling window lengths for this provider.</p>
+      
+      <div class="form-group">
+        <label>Plan / Tier</label>
+        <select id="customTierSelect">
+          <!-- Populated dynamically -->
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Max Prompts in Window</label>
+        <input type="number" id="customMaxInput" min="1" max="1000">
+      </div>
+
+      <div class="form-group">
+        <label>Window Duration (Minutes)</label>
+        <input type="number" id="customWindowInput" min="1" max="1440">
+      </div>
+
+      <div class="modal-actions">
+        <button id="cancelCustomBtn" class="btn btn-secondary">Cancel</button>
+        <button id="saveCustomBtn" class="btn btn-primary">Save Limit</button>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="popup.js"></script>
 </body>
 </html>

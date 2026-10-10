@@ -104,13 +104,14 @@ function purgeExpiredPrompts(state, now = Date.now()) {
 /**
  * Re-evaluate bot status (e.g., checks if limit countdown has expired)
  */
-function evaluateStatus(state, now = Date.now()) {
+function evaluateStatus(state, now = Date.now(), thresholdPercent = 85) {
   // If explicitly limited, check if resetsAt has passed
   if (state.status === STATUS.LIMITED) {
     if (state.resetsAt && state.resetsAt <= now) {
       state.status = STATUS.AVAILABLE;
       state.resetsAt = null;
       state.limitReason = '';
+      state.lastApproachingAlertTs = null;
     } else {
       return state;
     }
@@ -119,6 +120,7 @@ function evaluateStatus(state, now = Date.now()) {
   purgeExpiredPrompts(state, now);
   const count = state.prompts.length;
   const max = state.maxPrompts || 80;
+  const pct = Math.round((count / max) * 100);
 
   if (count >= max) {
     state.status = STATUS.LIMITED;
@@ -129,7 +131,7 @@ function evaluateStatus(state, now = Date.now()) {
       state.resetsAt = oldestPromptTime + windowMs;
       state.limitReason = `Rolling quota reached (${count}/${max} prompts).`;
     }
-  } else if (count >= Math.floor(max * 0.8)) {
+  } else if (pct >= thresholdPercent) {
     state.status = STATUS.APPROACHING;
   } else if (state.lastSeen) {
     state.status = STATUS.AVAILABLE;
@@ -156,7 +158,7 @@ export async function getAllBotStates() {
     } else {
       const beforeStatus = states[botId].status;
       const beforeResetsAt = states[botId].resetsAt;
-      states[botId] = evaluateStatus(states[botId], now);
+      states[botId] = evaluateStatus(states[botId], now, settings.warningThresholdPercent || 85);
       if (beforeStatus !== states[botId].status || beforeResetsAt !== states[botId].resetsAt) {
         updated = true;
       }
@@ -179,9 +181,10 @@ export async function getBotState(botId) {
 }
 
 /**
- * Record a prompt sent by user
+ * Record a prompt sent by user with approaching limit check
  */
 export async function recordPromptSent(botId, model = null) {
+  const settings = await getSettings();
   const all = await getAllBotStates();
   const state = all[botId];
   if (!state) return null;
@@ -196,19 +199,36 @@ export async function recordPromptSent(botId, model = null) {
     model: model || state.activeModel
   });
 
-  evaluateStatus(state, now);
+  const threshold = settings.warningThresholdPercent || 85;
+  const count = state.prompts.length;
+  const max = state.maxPrompts || 80;
+  const pct = Math.round((count / max) * 100);
+
+  evaluateStatus(state, now, threshold);
+
+  // Check if we hit the warning threshold (e.g. 85%)
+  let approachingTriggered = false;
+  const windowMs = (state.windowMinutes || 180) * 60 * 1000;
+  if (pct >= threshold && state.status !== STATUS.LIMITED) {
+    if (!state.lastApproachingAlertTs || (now - state.lastApproachingAlertTs) >= windowMs) {
+      state.lastApproachingAlertTs = now;
+      approachingTriggered = true;
+    }
+  }
+
   all[botId] = state;
   await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, all);
 
   // Append to history log
   await logHistoryEvent({
-    type: 'prompt',
+    type: approachingTriggered ? 'approaching_limit' : 'prompt',
     botId,
     model: model || state.activeModel,
+    pct,
     timestamp: now
   });
 
-  return state;
+  return { state, approachingTriggered, percentage: pct, remaining: Math.max(0, max - count) };
 }
 
 /**
@@ -245,6 +265,7 @@ export async function recordLimitDetected(botId, { resetsAt, reason, model, plan
  * Clear rate limit for a bot
  */
 export async function clearLimit(botId) {
+  const settings = await getSettings();
   const all = await getAllBotStates();
   const state = all[botId];
   if (!state) return null;
@@ -252,10 +273,42 @@ export async function clearLimit(botId) {
   state.status = STATUS.AVAILABLE;
   state.resetsAt = null;
   state.limitReason = '';
-  // Optional: clear prompts or keep them
-  all[botId] = evaluateStatus(state, Date.now());
+  state.lastApproachingAlertTs = null;
+  all[botId] = evaluateStatus(state, Date.now(), settings.warningThresholdPercent || 85);
   await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, all);
 
+  return state;
+}
+
+/**
+ * Directly update custom limits for a bot (max prompts, window duration, tier)
+ */
+export async function updateBotCustomLimit(botId, { maxPrompts, windowMinutes, tier } = {}) {
+  const all = await getAllBotStates();
+  const state = all[botId];
+  if (!state) return null;
+
+  if (maxPrompts !== undefined && Number(maxPrompts) > 0) {
+    state.maxPrompts = Number(maxPrompts);
+  }
+  if (windowMinutes !== undefined && Number(windowMinutes) > 0) {
+    state.windowMinutes = Number(windowMinutes);
+  }
+  if (tier) {
+    state.tier = tier;
+  }
+
+  const settings = await getSettings();
+  if (!settings.customLimits) settings.customLimits = {};
+  settings.customLimits[botId] = {
+    tier: state.tier,
+    maxPrompts: state.maxPrompts,
+    windowMinutes: state.windowMinutes
+  };
+  await saveSettings(settings);
+
+  all[botId] = evaluateStatus(state, Date.now(), settings.warningThresholdPercent || 85);
+  await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, all);
   return state;
 }
 

@@ -16,18 +16,21 @@ Monitor your chat quotas, track message limits, detect rate limits in real-time,
 - **Deep Network & DOM Telemetry**:
   - **Network Interceptor (MAIN World)**: Captures HTTP `429 Too Many Requests`, `resets_at` timestamps, `clears_in` seconds, and subscription tiers (`pro`, `plus`, `advanced`, `free`) directly from official API responses.
   - **DOM Observer**: Continually monitors chat containers for warning messages like *"You have 5 messages remaining until 3:00 PM"* or *"You've reached your usage limit until 4:15 PM"*.
-- **Predictive Rolling Window Quota**:
+- **Predictive Rolling Window Quota & 85% Early Warning Alerts**:
   - Automatically logs outgoing prompts and calculates rolling usage consumption so you know how close you are to your cap *before* getting blocked.
+  - **85% Warning Notification**: Sends an alert as soon as you reach 85% of your quota (e.g., *"⚠️ Claude Limit Warning (85%): You've used 38/45 messages. Only 7 prompts left before cooldown"*).
+- **Direct Quota & Limit Customization**:
+  - Click the **Limit** button on any bot card in the popup to instantly customize your prompt caps and window duration.
+  - Or open the Options page to configure custom warning thresholds (50%–95%), notifications, and provider tiers.
 - **Live Ticking Countdown Timers**:
   - Real-time `hh:mm:ss` countdown to the moment your limit resets or your oldest rolling message slot clears.
 - **Desktop System Notifications**:
   - Get notified instantly the moment a cooldown expires: *"🎉 Claude is ready! Your 5-hour limit window has reset."*
+  - Clicking any alert directly opens the limit customizer.
 - **Toolbar Badge Counter**:
   - Glance at your browser toolbar to see remaining cooldown minutes (e.g., `15m` in red) or active status.
 - **In-Page Floating Status HUD**:
   - Optional subtle glassmorphism pill in the corner of your chat page showing message count and time until reset.
-- **Customizable Quotas & Plans**:
-  - Easily tweak maximum message caps and window lengths in the Options page to match custom enterprise or team plans.
 - **100% Private & Local**:
   - Runs entirely in your browser using `chrome.storage.local`. No external analytics, no telemetry, no tracking, and no API keys required.
 

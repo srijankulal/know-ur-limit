@@ -23,6 +23,19 @@ async function loadSettings() {
   // Toggles & Selects
   document.getElementById('notifyOnReset').checked = !!currentSettings.notifyOnReset;
   document.getElementById('notifyOnLimit').checked = !!currentSettings.notifyOnLimit;
+  document.getElementById('notifyOnApproaching').checked = currentSettings.notifyOnApproaching !== false;
+
+  const threshold = currentSettings.warningThresholdPercent || 85;
+  const slider = document.getElementById('warningThresholdPercent');
+  const display = document.getElementById('thresholdDisplay');
+  if (slider && display) {
+    slider.value = threshold;
+    display.textContent = `${threshold}%`;
+    slider.oninput = () => {
+      display.textContent = `${slider.value}%`;
+    };
+  }
+
   document.getElementById('badgeMode').value = currentSettings.badgeMode || 'countdown';
   document.getElementById('showFloatingHud').checked = currentSettings.showFloatingHud !== false;
 
@@ -65,6 +78,8 @@ async function handleSaveSettings() {
   const updatedSettings = {
     notifyOnReset: document.getElementById('notifyOnReset').checked,
     notifyOnLimit: document.getElementById('notifyOnLimit').checked,
+    notifyOnApproaching: document.getElementById('notifyOnApproaching').checked,
+    warningThresholdPercent: parseInt(document.getElementById('warningThresholdPercent').value, 10) || 85,
     badgeMode: document.getElementById('badgeMode').value,
     showFloatingHud: document.getElementById('showFloatingHud').checked,
     customLimits: {}
@@ -83,6 +98,12 @@ async function handleSaveSettings() {
   }
 
   await saveSettings(updatedSettings);
+
+  // Sync state with background worker
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+    chrome.runtime.sendMessage({ action: 'GET_ALL_STATES' }, () => {});
+  }
+
   showToast('Settings saved successfully!');
 }
 
