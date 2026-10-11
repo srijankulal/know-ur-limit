@@ -1,11 +1,14 @@
 /**
- * AI Usage Limits Hub - Claude DOM Monitor
+ * AI Usage Limits Hub - Claude DOM Monitor & Auto-Fetcher
+ * Auto-fetches usage quotas, rolling 5-hour limits, and reset times directly from claude.ai browser sessions.
  */
 
 (function () {
   'use strict';
 
   const BOT_ID = 'claude';
+  let isFetching = false;
+  let lastFetchTs = 0;
 
   function parseResetTime(text) {
     if (!text) return null;
@@ -44,9 +47,76 @@
     return null;
   }
 
-  // 1. DOM Observer for Claude Rate Limits & Warnings
-  const observer = new MutationObserver(() => {
-    // Look for limit warnings / banners
+  // ----------------------------------------------------
+  // Live Browser Session Auto-Fetcher for Claude
+  // ----------------------------------------------------
+  async function autoFetchClaudeUsage() {
+    if (isFetching) return;
+    isFetching = true;
+    lastFetchTs = Date.now();
+
+    const onLoginPage = window.location.pathname.includes('/login') || window.location.pathname.includes('/signup');
+    const onChatPage = window.location.pathname.startsWith('/chat') || window.location.pathname.startsWith('/project');
+    const hasEditor = !!document.querySelector('div[contenteditable="true"]');
+    const hasUserMenu = !!document.querySelector('[data-testid="user-menu-button"], button[aria-label*="user"], a[href="/new"], a[href*="/chat/"]');
+    const isLoggedIn = !onLoginPage && (onChatPage || hasEditor || hasUserMenu || document.cookie.includes('sessionKey'));
+
+    const result = {
+      botId: BOT_ID,
+      isLoggedIn: isLoggedIn,
+      tier: 'free',
+      usedPercent: null,
+      resetsAt: null,
+      quotaWindows: null,
+      accountEmail: null,
+      isLimited: false,
+      limitReason: null,
+      fetchStatus: onLoginPage ? 'login_required' : (isLoggedIn ? 'synced' : 'idle')
+    };
+
+    // Detect plan tier from DOM badges
+    const badgeElements = document.querySelectorAll('span, button, a');
+    for (const el of badgeElements) {
+      const txt = (el.textContent || '').trim();
+      if (txt === 'Claude Pro' || txt === 'Pro Plan') {
+        result.tier = 'pro';
+        break;
+      } else if (txt === 'Claude Team' || txt === 'Team Plan') {
+        result.tier = 'team';
+        break;
+      }
+    }
+
+    // Check DOM for active rate limits
+    const bannerMatch = checkDomForLimitNotice();
+    if (bannerMatch) {
+      result.isLimited = true;
+      result.resetsAt = bannerMatch.resetsAt || (Date.now() + 5 * 3600 * 1000);
+      result.limitReason = bannerMatch.reason;
+    }
+
+    // Trigger high-fidelity in-page fetch via interceptor in MAIN world (exempt from isolated CSP/CORS)
+    try {
+      window.postMessage({
+        source: 'AI_LIMITS_HUB_REQUEST',
+        action: 'TRIGGER_IN_PAGE_FETCH',
+        botId: BOT_ID
+      }, '*');
+    } catch (_) {}
+
+    // Transmit DOM auto-fetch result to background
+    try {
+      chrome.runtime.sendMessage({
+        action: 'AUTO_FETCH_RESULT',
+        data: result
+      });
+    } catch (_) {}
+
+    isFetching = false;
+    return result;
+  }
+
+  function checkDomForLimitNotice() {
     const allDivs = document.querySelectorAll('div, p, span, h3');
     for (const el of allDivs) {
       const text = el.textContent || '';
@@ -56,22 +126,32 @@
         text.includes("messages remaining until") ||
         text.includes("reached your message limit")
       ) {
-        const resetsAt = parseResetTime(text);
-        try {
-          chrome.runtime.sendMessage({
-            action: 'LIMIT_DETECTED',
-            data: {
-              botId: BOT_ID,
-              resetsAt: resetsAt || (Date.now() + 5 * 3600 * 1000),
-              reason: text.slice(0, 160)
-            }
-          });
-        } catch (e) {}
-        break;
+        return {
+          resetsAt: parseResetTime(text),
+          reason: text.slice(0, 160)
+        };
       }
     }
+    return null;
+  }
 
-    // Look for Pro badge
+  // 1. DOM Observer for Claude Rate Limits & Badges
+  const observer = new MutationObserver(() => {
+    const limitInfo = checkDomForLimitNotice();
+    if (limitInfo) {
+      try {
+        chrome.runtime.sendMessage({
+          action: 'LIMIT_DETECTED',
+          data: {
+            botId: BOT_ID,
+            resetsAt: limitInfo.resetsAt || (Date.now() + 5 * 3600 * 1000),
+            reason: limitInfo.reason
+          }
+        });
+      } catch (e) {}
+    }
+
+    // Look for Pro / Team badge
     const badgeElements = document.querySelectorAll('span, button, a');
     for (const el of badgeElements) {
       const txt = (el.textContent || '').trim();
@@ -99,7 +179,7 @@
     } catch (e) {}
   }
 
-  // 2. Track Prompt Submissions
+  // 2. Track Prompt Submissions & Trigger Immediate Sync Afterwards
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       const editor = document.querySelector('div[contenteditable="true"]');
@@ -124,7 +204,7 @@
     if (now - lastSentTs < 1000) return;
     lastSentTs = now;
 
-    // Detect model (e.g. Sonnet, Opus, Haiku)
+    // Detect model
     let model = 'claude-3-5-sonnet';
     const modelSelector = document.querySelector('[data-testid="model-selector-dropdown"], button');
     if (modelSelector && modelSelector.textContent) {
@@ -140,7 +220,28 @@
         data: { botId: BOT_ID, model }
       });
     } catch (e) {}
+
+    // Auto-fetch updated quota 3 seconds after sending prompt
+    setTimeout(autoFetchClaudeUsage, 3000);
   }
 
-  console.log('[AI Usage Limits] Claude DOM watcher registered');
+  // 3. Listen for on-demand fetch requests from background or popup
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'TRIGGER_AUTO_FETCH' && (message.botId === BOT_ID || !message.botId)) {
+      autoFetchClaudeUsage().then((res) => {
+        sendResponse({ success: true, data: res });
+      });
+      return true;
+    }
+  });
+
+  // 4. Run on load and periodically every 2 minutes while tab is open
+  autoFetchClaudeUsage();
+  setInterval(() => {
+    if (Date.now() - lastFetchTs >= 120000) {
+      autoFetchClaudeUsage();
+    }
+  }, 120000);
+
+  console.log('[AI Usage Limits] Claude DOM watcher & live auto-fetcher active');
 })();

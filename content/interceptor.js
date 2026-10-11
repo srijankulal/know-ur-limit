@@ -101,6 +101,7 @@
           }
         } catch (_) {}
         dispatchToBridge('PROMPT_SENT', { botId, model });
+        setTimeout(performCurrentBotSync, 3500);
       } else if (botId === 'claude' && (url.includes('/chat_conversations') || url.includes('/completion')) && method === 'POST') {
         let model = 'claude-3-5-sonnet';
         try {
@@ -110,10 +111,12 @@
           }
         } catch (_) {}
         dispatchToBridge('PROMPT_SENT', { botId, model });
+        setTimeout(performCurrentBotSync, 3500);
       } else if (botId === 'gemini' && (url.includes('BardChatUi') || url.includes('BardFrontendService')) && method === 'POST') {
         dispatchToBridge('PROMPT_SENT', { botId, model: 'gemini-2.0-flash' });
       } else if (botId === 'deepseek' && url.includes('/chat/completion') && method === 'POST') {
         dispatchToBridge('PROMPT_SENT', { botId, model: 'deepseek-chat' });
+        setTimeout(performCurrentBotSync, 3500);
       }
     } catch (err) {
       // Don't fail the user's fetch request
@@ -131,7 +134,50 @@
     try {
       // 1. ChatGPT
       if (botId === 'chatgpt') {
-        if (url.includes('/backend-api/accounts/check') && response.ok) {
+        if (url.includes('/backend-api/wham/usage') && response.ok) {
+          const clone = response.clone();
+          clone.json().then(data => {
+            let tier = 'plus';
+            if (data?.plan_type) {
+              const p = String(data.plan_type).toLowerCase();
+              if (p.includes('pro')) tier = 'pro';
+              else if (p.includes('team')) tier = 'team';
+              else if (p.includes('plus')) tier = 'plus';
+              else tier = 'free';
+            }
+            let usedPercent = null;
+            let usedCount = null;
+            let pendingCount = null;
+            let resetsAt = null;
+            const rl = data?.rate_limit?.primary_window || data?.rate_limit;
+            if (rl) {
+              if (typeof rl.used === 'number' && typeof rl.limit === 'number') {
+                usedCount = rl.used;
+                pendingCount = Math.max(0, rl.limit - rl.used);
+                usedPercent = Math.round((rl.used / rl.limit) * 100);
+              } else if (typeof rl.used_percent === 'number') {
+                usedPercent = rl.used_percent <= 1 && rl.used_percent > 0 ? Math.round(rl.used_percent * 100) : Math.round(rl.used_percent);
+              }
+              if (typeof rl.reset_after_seconds === 'number' && rl.reset_after_seconds > 0) {
+                resetsAt = Date.now() + (rl.reset_after_seconds * 1000);
+              } else if (rl.resets_at) {
+                const p = new Date(rl.resets_at).getTime();
+                if (!isNaN(p)) resetsAt = p;
+              }
+            }
+            dispatchToBridge('AUTO_FETCH_RESULT', {
+              botId,
+              isLoggedIn: true,
+              tier,
+              usedPercent,
+              usedCount,
+              pendingCount,
+              resetsAt,
+              quotaWindows: data,
+              fetchStatus: 'synced'
+            });
+          }).catch(() => {});
+        } else if (url.includes('/backend-api/accounts/check') && response.ok) {
           const clone = response.clone();
           clone.json().then(data => {
             const plan = data?.account?.plan_type || data?.plan_type;
@@ -169,13 +215,44 @@
 
       // 2. Claude
       else if (botId === 'claude') {
-        if (url.includes('/api/organizations') && !url.includes('/chat_conversations') && response.ok) {
+        if (url.includes('/api/organizations/') && url.includes('/usage') && response.ok) {
+          const clone = response.clone();
+          clone.json().then(data => {
+            let usedPercent = null;
+            let usedCount = null;
+            let pendingCount = null;
+            let resetsAt = null;
+            if (data?.five_hour) {
+              const util = data.five_hour.utilization;
+              if (typeof util === 'number') {
+                usedPercent = util <= 1.0 && util > 0 ? Math.round(util * 100) : Math.round(util);
+                const defaultCap = 45;
+                usedCount = Math.round((usedPercent / 100) * defaultCap);
+                pendingCount = Math.max(0, defaultCap - usedCount);
+              }
+              if (data.five_hour.resets_at) {
+                const p = new Date(data.five_hour.resets_at).getTime();
+                if (!isNaN(p)) resetsAt = p;
+              }
+            }
+            dispatchToBridge('AUTO_FETCH_RESULT', {
+              botId,
+              isLoggedIn: true,
+              usedPercent,
+              usedCount,
+              pendingCount,
+              resetsAt,
+              quotaWindows: data,
+              fetchStatus: 'synced'
+            });
+          }).catch(() => {});
+        } else if (url.includes('/api/organizations') && !url.includes('/chat_conversations') && response.ok) {
           const clone = response.clone();
           clone.json().then(data => {
             const orgs = Array.isArray(data) ? data : [data];
             for (const org of orgs) {
               const caps = org?.capabilities || [];
-              const tier = caps.includes('claude_pro') || org?.has_active_subscription ? 'pro' : 'free';
+              const tier = caps.includes('claude_team') ? 'team' : (caps.includes('claude_pro') || org?.has_active_subscription) ? 'pro' : 'free';
               dispatchToBridge('PLAN_DETECTED', { botId, plan: tier });
               break;
             }
@@ -267,6 +344,254 @@
 
     return originalSend.apply(this, arguments);
   };
+
+  // ----------------------------------------------------
+  // 3. Active In-Page Fetcher (Bypasses MV3 CSP & CORS)
+  // ----------------------------------------------------
+  let isSyncing = false;
+
+  async function performInPageClaudeSync() {
+    try {
+      const orgResp = await originalFetch('/api/organizations', {
+        headers: { 'Accept': 'application/json' }
+      });
+
+      if (!orgResp.ok) {
+        if (orgResp.status === 401 || (orgResp.redirected && orgResp.url.includes('/login'))) {
+          dispatchToBridge('AUTO_FETCH_RESULT', {
+            botId: 'claude',
+            isLoggedIn: false,
+            fetchStatus: 'login_required'
+          });
+        }
+        return;
+      }
+
+      const orgs = await orgResp.json();
+      const orgList = Array.isArray(orgs) ? orgs : (orgs?.items || [orgs]);
+      if (!orgList.length || !orgList[0]?.id) return;
+
+      const primaryOrg = orgList[0];
+      const orgId = primaryOrg.id;
+      const caps = primaryOrg.capabilities || [];
+      let tier = 'free';
+      if (caps.includes('claude_team') || primaryOrg.has_team_subscription) {
+        tier = 'team';
+      } else if (caps.includes('claude_pro') || primaryOrg.has_active_subscription) {
+        tier = 'pro';
+      }
+
+      let usedPercent = null;
+      let usedCount = null;
+      let pendingCount = null;
+      let resetsAt = null;
+      let quotaWindows = null;
+      let accountEmail = null;
+      let isLimited = false;
+      let limitReason = null;
+
+      if (orgId) {
+        try {
+          const usageResp = await originalFetch(`/api/organizations/${orgId}/usage`, {
+            headers: { 'Accept': 'application/json' }
+          });
+          if (usageResp.ok) {
+            quotaWindows = await usageResp.json();
+            if (quotaWindows?.five_hour) {
+              const util = quotaWindows.five_hour.utilization;
+              if (typeof util === 'number') {
+                usedPercent = util <= 1.0 && util > 0 ? Math.round(util * 100) : Math.round(util);
+                const defaultCap = tier === 'pro' ? 45 : tier === 'team' ? 90 : 12;
+                usedCount = Math.round((usedPercent / 100) * defaultCap);
+                pendingCount = Math.max(0, defaultCap - usedCount);
+              }
+              if (quotaWindows.five_hour.resets_at) {
+                const parsed = new Date(quotaWindows.five_hour.resets_at).getTime();
+                if (!isNaN(parsed)) resetsAt = parsed;
+              }
+              if (usedPercent !== null && usedPercent >= 100) {
+                isLimited = true;
+                limitReason = 'Claude 5-hour quota reached';
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      try {
+        const userResp = await originalFetch('/api/auth/current_user', {
+          headers: { 'Accept': 'application/json' }
+        });
+        if (userResp.ok) {
+          const userData = await userResp.json();
+          accountEmail = userData.email_address || userData.email || null;
+        }
+      } catch (_) {}
+
+      dispatchToBridge('AUTO_FETCH_RESULT', {
+        botId: 'claude',
+        isLoggedIn: true,
+        tier,
+        usedPercent,
+        usedCount,
+        pendingCount,
+        resetsAt,
+        quotaWindows,
+        accountEmail,
+        isLimited,
+        limitReason,
+        fetchStatus: 'synced'
+      });
+      dispatchToBridge('PLAN_DETECTED', { botId: 'claude', plan: tier });
+    } catch (err) {
+      console.debug('[AI Limits Interceptor] In-page Claude sync note:', err.message);
+    }
+  }
+
+  async function performInPageChatGPTSync() {
+    try {
+      const sessionResp = await originalFetch('/api/auth/session', {
+        headers: { 'Accept': 'application/json' }
+      });
+      if (!sessionResp.ok) {
+        if (sessionResp.status === 401 || (sessionResp.redirected && sessionResp.url.includes('/login'))) {
+          dispatchToBridge('AUTO_FETCH_RESULT', {
+            botId: 'chatgpt',
+            isLoggedIn: false,
+            fetchStatus: 'login_required'
+          });
+        }
+        return;
+      }
+
+      const sessionData = await sessionResp.json();
+      const token = sessionData?.accessToken;
+      if (!token) return;
+
+      let tier = 'plus';
+      let usedPercent = null;
+      let usedCount = null;
+      let pendingCount = null;
+      let resetsAt = null;
+      let quotaWindows = null;
+      let isLimited = false;
+      let limitReason = null;
+
+      const accountId = sessionData?.account?.id || sessionData?.user?.id || sessionData?.accountId || '';
+      const authHeaders = {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json'
+      };
+      if (accountId) {
+        authHeaders['ChatGPT-Account-Id'] = accountId;
+      }
+
+      try {
+        const usageResp = await originalFetch('/backend-api/wham/usage', {
+          headers: authHeaders
+        });
+        if (usageResp.ok) {
+          quotaWindows = await usageResp.json();
+          if (quotaWindows?.plan_type) {
+            const planStr = String(quotaWindows.plan_type).toLowerCase();
+            if (planStr.includes('pro')) tier = 'pro';
+            else if (planStr.includes('team')) tier = 'team';
+            else if (planStr.includes('plus')) tier = 'plus';
+            else tier = 'free';
+          }
+          const rateLimit = quotaWindows.rate_limit?.primary_window || quotaWindows.rate_limit;
+          if (rateLimit) {
+            if (typeof rateLimit.used === 'number' && typeof rateLimit.limit === 'number') {
+              usedCount = rateLimit.used;
+              pendingCount = Math.max(0, rateLimit.limit - rateLimit.used);
+              usedPercent = Math.round((rateLimit.used / rateLimit.limit) * 100);
+            } else if (typeof rateLimit.used_percent === 'number') {
+              const util = rateLimit.used_percent;
+              usedPercent = util <= 1.0 && util > 0 ? Math.round(util * 100) : Math.round(util);
+            }
+            if (typeof rateLimit.reset_after_seconds === 'number' && rateLimit.reset_after_seconds > 0) {
+              resetsAt = Date.now() + (rateLimit.reset_after_seconds * 1000);
+            } else if (rateLimit.resets_at) {
+              const p = new Date(rateLimit.resets_at).getTime();
+              if (!isNaN(p)) resetsAt = p;
+            }
+            if (usedPercent !== null && usedPercent >= 100) {
+              isLimited = true;
+              limitReason = 'ChatGPT rolling window cap reached';
+            }
+          }
+        }
+      } catch (_) {}
+
+      dispatchToBridge('AUTO_FETCH_RESULT', {
+        botId: 'chatgpt',
+        isLoggedIn: true,
+        tier,
+        usedPercent,
+        usedCount,
+        pendingCount,
+        resetsAt,
+        quotaWindows,
+        accountEmail: sessionData.user?.email || null,
+        isLimited,
+        limitReason,
+        fetchStatus: 'synced'
+      });
+      dispatchToBridge('PLAN_DETECTED', { botId: 'chatgpt', plan: tier });
+    } catch (err) {
+      console.debug('[AI Limits Interceptor] In-page ChatGPT sync note:', err.message);
+    }
+  }
+
+  async function performInPageDeepSeekSync() {
+    try {
+      const userResp = await originalFetch('/api/v0/users/current', {
+        headers: { 'Accept': 'application/json' }
+      });
+      if (userResp.ok) {
+        const userData = await userResp.json();
+        if (userData?.code === 0 && userData?.data) {
+          dispatchToBridge('AUTO_FETCH_RESULT', {
+            botId: 'deepseek',
+            isLoggedIn: true,
+            tier: 'free',
+            accountEmail: userData.data.email || userData.data.phone || userData.data.name || null,
+            fetchStatus: 'synced'
+          });
+        }
+      }
+    } catch (_) {}
+  }
+
+  async function performCurrentBotSync() {
+    if (isSyncing) return;
+    isSyncing = true;
+    try {
+      if (botId === 'claude') {
+        await performInPageClaudeSync();
+      } else if (botId === 'chatgpt') {
+        await performInPageChatGPTSync();
+      } else if (botId === 'deepseek') {
+        await performInPageDeepSeekSync();
+      }
+    } finally {
+      isSyncing = false;
+    }
+  }
+
+  // Listen for sync triggers from content script / bridge
+  window.addEventListener('message', (event) => {
+    if (event.source !== window || !event.data || event.data.source !== 'AI_LIMITS_HUB_REQUEST') return;
+    if (event.data.action === 'TRIGGER_IN_PAGE_FETCH') {
+      performCurrentBotSync();
+    }
+  });
+
+  // Automatically sync on page load with slight debounce
+  setTimeout(performCurrentBotSync, 1500);
+
+  // Periodic in-page sync every 2 minutes
+  setInterval(performCurrentBotSync, 120000);
 
   console.log(`[AI Usage Limits] Active network monitor hooked for ${botId}`);
 })();

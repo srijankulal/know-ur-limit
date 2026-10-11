@@ -76,18 +76,32 @@ function createDefaultBotState(botId, settings) {
   const custom = settings?.customLimits?.[botId] || {};
   const tierKey = custom.tier || Object.keys(botDef.tiers)[0];
   const tierDef = botDef.tiers[tierKey] || Object.values(botDef.tiers)[0];
+  const maxPrompts = custom.maxPrompts || tierDef.defaultMax;
 
   return {
     botId,
     tier: tierKey,
-    maxPrompts: custom.maxPrompts || tierDef.defaultMax,
+    maxPrompts,
     windowMinutes: custom.windowMinutes || tierDef.windowMinutes,
     status: STATUS.UNKNOWN,
     prompts: [],
     resetsAt: null,
     limitReason: '',
     lastSeen: null,
-    activeModel: botDef.defaultModel
+    activeModel: botDef.defaultModel,
+    // Live usage tracking (how much used & how much pending)
+    usedCount: 0,
+    pendingCount: maxPrompts,
+    usedPercent: 0,
+    pendingPercent: 100,
+    liveUtilizationPercent: null,
+    // Auto-fetch telemetry fields
+    fetchedFromBrowser: false,
+    lastFetchedAt: null,
+    quotaWindows: null,
+    isLoggedIn: false,
+    accountEmail: null,
+    fetchStatus: 'idle' // 'idle' | 'synced' | 'login_required' | 'error' | 'tab_required'
   };
 }
 
@@ -105,6 +119,12 @@ function purgeExpiredPrompts(state, now = Date.now()) {
  * Re-evaluate bot status (e.g., checks if limit countdown has expired)
  */
 function evaluateStatus(state, now = Date.now(), thresholdPercent = 85) {
+  // If not logged in and marked as login_required, status is UNKNOWN
+  if (!state.isLoggedIn && state.fetchStatus === 'login_required') {
+    state.status = STATUS.UNKNOWN;
+    return state;
+  }
+
   // If explicitly limited, check if resetsAt has passed
   if (state.status === STATUS.LIMITED) {
     if (state.resetsAt && state.resetsAt <= now) {
@@ -112,6 +132,12 @@ function evaluateStatus(state, now = Date.now(), thresholdPercent = 85) {
       state.resetsAt = null;
       state.limitReason = '';
       state.lastApproachingAlertTs = null;
+      state.liveUtilizationPercent = null;
+      state.prompts = [];
+      state.usedPercent = 0;
+      state.pendingPercent = 100;
+      state.usedCount = 0;
+      state.pendingCount = state.maxPrompts || 80;
     } else {
       return state;
     }
@@ -120,20 +146,31 @@ function evaluateStatus(state, now = Date.now(), thresholdPercent = 85) {
   purgeExpiredPrompts(state, now);
   const count = state.prompts.length;
   const max = state.maxPrompts || 80;
-  const pct = Math.round((count / max) * 100);
 
-  if (count >= max) {
+  // Use live utilization percentage from server API if available, else derive from prompts
+  if (typeof state.liveUtilizationPercent === 'number' && state.liveUtilizationPercent !== null) {
+    state.usedPercent = Math.min(100, Math.max(0, state.liveUtilizationPercent));
+    state.usedCount = Math.min(max, Math.round((state.usedPercent / 100) * max));
+    state.pendingCount = Math.max(0, max - state.usedCount);
+  } else {
+    state.usedPercent = Math.min(100, Math.round((count / max) * 100));
+    state.usedCount = count;
+    state.pendingCount = Math.max(0, max - count);
+  }
+  state.pendingPercent = Math.max(0, 100 - state.usedPercent);
+
+  if (state.usedCount >= max || state.usedPercent >= 100) {
     state.status = STATUS.LIMITED;
     // Calculate reset time based on the oldest prompt expiry
     if (!state.resetsAt && state.prompts.length > 0) {
       const oldestPromptTime = state.prompts[0].timestamp;
       const windowMs = (state.windowMinutes || 180) * 60 * 1000;
       state.resetsAt = oldestPromptTime + windowMs;
-      state.limitReason = `Rolling quota reached (${count}/${max} prompts).`;
+      state.limitReason = `Rolling quota reached (${state.usedCount}/${max} prompts).`;
     }
-  } else if (pct >= thresholdPercent) {
+  } else if (state.usedPercent >= thresholdPercent) {
     state.status = STATUS.APPROACHING;
-  } else if (state.lastSeen) {
+  } else if (state.isLoggedIn || state.lastSeen) {
     state.status = STATUS.AVAILABLE;
   } else {
     state.status = STATUS.UNKNOWN;
@@ -191,6 +228,8 @@ export async function recordPromptSent(botId, model = null) {
 
   const now = Date.now();
   state.lastSeen = now;
+  state.isLoggedIn = true;
+  state.fetchStatus = 'synced';
   if (model) state.activeModel = model;
 
   purgeExpiredPrompts(state, now);
@@ -199,12 +238,18 @@ export async function recordPromptSent(botId, model = null) {
     model: model || state.activeModel
   });
 
-  const threshold = settings.warningThresholdPercent || 85;
-  const count = state.prompts.length;
   const max = state.maxPrompts || 80;
-  const pct = Math.round((count / max) * 100);
+  // If we had a liveUtilizationPercent from the provider, also reflect this prompt
+  if (typeof state.liveUtilizationPercent === 'number' && state.liveUtilizationPercent !== null) {
+    const promptIncrement = (1 / max) * 100;
+    state.liveUtilizationPercent = Math.min(100, Math.round(state.liveUtilizationPercent + promptIncrement));
+  }
 
+  const threshold = settings.warningThresholdPercent || 85;
   evaluateStatus(state, now, threshold);
+
+  const count = state.usedCount;
+  const pct = state.usedPercent;
 
   // Check if we hit the warning threshold (e.g. 85%)
   let approachingTriggered = false;
@@ -241,9 +286,15 @@ export async function recordLimitDetected(botId, { resetsAt, reason, model, plan
 
   const now = Date.now();
   state.lastSeen = now;
+  state.isLoggedIn = true;
   state.status = STATUS.LIMITED;
   state.resetsAt = resetsAt || (now + (state.windowMinutes || 180) * 60 * 1000);
   state.limitReason = reason || 'Rate limit reached';
+  state.liveUtilizationPercent = 100;
+  state.usedPercent = 100;
+  state.pendingPercent = 0;
+  state.usedCount = state.maxPrompts || 80;
+  state.pendingCount = 0;
   if (model) state.activeModel = model;
   if (plan) state.tier = plan;
 
@@ -255,6 +306,123 @@ export async function recordLimitDetected(botId, { resetsAt, reason, model, plan
     botId,
     resetsAt: state.resetsAt,
     reason: state.limitReason,
+    timestamp: now
+  });
+
+  return state;
+}
+
+/**
+ * Record live usage limit auto-fetched directly from browser session
+ */
+export async function recordAutoFetchedUsage(botId, data = {}) {
+  const settings = await getSettings();
+  const all = await getAllBotStates();
+  const state = all[botId];
+  if (!state) return null;
+
+  const now = Date.now();
+  state.lastSeen = now;
+
+  // Handle explicit not-logged-in case
+  if (data.isLoggedIn === false) {
+    state.isLoggedIn = false;
+    state.fetchStatus = 'login_required';
+    state.fetchedFromBrowser = false;
+    state.status = STATUS.UNKNOWN;
+    state.liveUtilizationPercent = null;
+    if (data.limitReason) state.limitReason = data.limitReason;
+    all[botId] = state;
+    await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, all);
+    return state;
+  }
+
+  state.lastFetchedAt = now;
+  state.isLoggedIn = true;
+  state.fetchedFromBrowser = true;
+  state.fetchStatus = data.fetchStatus || 'synced';
+
+  if (data.accountEmail) {
+    state.accountEmail = data.accountEmail;
+  }
+  if (data.activeModel) {
+    state.activeModel = data.activeModel;
+  }
+
+  // Update plan tier if detected from browser
+  if (data.tier && BOTS[botId]?.tiers[data.tier]) {
+    state.tier = data.tier;
+    const tierDef = BOTS[botId].tiers[data.tier];
+    const custom = settings?.customLimits?.[botId];
+    state.maxPrompts = custom?.maxPrompts || tierDef.defaultMax;
+    state.windowMinutes = custom?.windowMinutes || tierDef.windowMinutes;
+  }
+
+  // Update quota windows (e.g., Claude's 5-hour and 7-day quotas, ChatGPT windows)
+  if (data.quotaWindows) {
+    state.quotaWindows = data.quotaWindows;
+  }
+
+  // Update reset timestamp
+  if (data.resetsAt !== undefined && data.resetsAt !== null) {
+    state.resetsAt = data.resetsAt;
+  }
+
+  // Update used & pending quota numbers
+  const max = state.maxPrompts || 80;
+  if (typeof data.usedCount === 'number' && typeof data.pendingCount === 'number') {
+    state.usedCount = Math.max(0, Math.round(data.usedCount));
+    state.pendingCount = Math.max(0, Math.round(data.pendingCount));
+    state.usedPercent = Math.min(100, Math.round((state.usedCount / max) * 100));
+    state.pendingPercent = Math.max(0, 100 - state.usedPercent);
+    state.liveUtilizationPercent = state.usedPercent;
+  } else if (typeof data.usedPercent === 'number' && !isNaN(data.usedPercent)) {
+    const rawPct = Math.min(100, Math.max(0, Math.round(data.usedPercent)));
+    state.liveUtilizationPercent = rawPct;
+    state.usedPercent = rawPct;
+    state.pendingPercent = Math.max(0, 100 - rawPct);
+    state.usedCount = Math.min(max, Math.round((rawPct / 100) * max));
+    state.pendingCount = Math.max(0, max - state.usedCount);
+
+    // Reconstruct prompt markers so count is consistent with percentage
+    const targetCount = state.usedCount;
+    const windowMs = (state.windowMinutes || 180) * 60 * 1000;
+    const oldestTs = state.resetsAt ? Math.max(now - windowMs, state.resetsAt - windowMs) : (now - (windowMs / 2));
+
+    state.prompts = [];
+    for (let i = 0; i < targetCount; i++) {
+      state.prompts.push({
+        timestamp: oldestTs + Math.floor((i / Math.max(1, targetCount)) * (now - oldestTs)),
+        model: state.activeModel,
+        autoFetched: true
+      });
+    }
+  }
+
+  if (data.limitReason) {
+    state.limitReason = data.limitReason;
+  }
+
+  // Evaluate status
+  const threshold = settings.warningThresholdPercent || 85;
+  if (data.isLimited || state.usedPercent >= 100 || (state.resetsAt && state.resetsAt > now && state.usedPercent >= 95)) {
+    state.status = STATUS.LIMITED;
+    if (!state.limitReason) state.limitReason = `${BOTS[botId]?.name || 'AI'} rate limit hit.`;
+  } else if (state.usedPercent >= threshold) {
+    state.status = STATUS.APPROACHING;
+  } else {
+    state.status = STATUS.AVAILABLE;
+  }
+
+  all[botId] = state;
+  await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, all);
+
+  await logHistoryEvent({
+    type: 'auto_fetch_sync',
+    botId,
+    usedPercent: state.usedPercent,
+    tier: state.tier,
+    status: state.status,
     timestamp: now
   });
 

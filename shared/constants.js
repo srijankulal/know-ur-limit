@@ -8,7 +8,10 @@ export const BOTS = {
     name: 'ChatGPT',
     shortName: 'GPT',
     url: 'https://chatgpt.com',
+    loginUrl: 'https://chatgpt.com/auth/login',
     domains: ['chatgpt.com', 'chat.openai.com'],
+    authDomain: 'chatgpt.com',
+    authCookies: ['__Secure-next-auth.session-token', '__Host-next-auth.session-token', 'next-auth.session-token', '_puid'],
     color: '#10a37f',
     colorLight: '#e6f7f2',
     defaultModel: 'gpt-4o',
@@ -25,7 +28,10 @@ export const BOTS = {
     name: 'Claude',
     shortName: 'Claude',
     url: 'https://claude.ai',
+    loginUrl: 'https://claude.ai/login',
     domains: ['claude.ai'],
+    authDomain: 'claude.ai',
+    authCookies: ['sessionKey', 'lastActiveOrg', 'activitySessionId', 'anthropic-consent', 'cf_clearance', 'intercom-session'],
     color: '#d97706',
     colorLight: '#fef3c7',
     defaultModel: 'claude-3-5-sonnet',
@@ -41,7 +47,10 @@ export const BOTS = {
     name: 'Google Gemini',
     shortName: 'Gemini',
     url: 'https://gemini.google.com',
+    loginUrl: 'https://gemini.google.com',
     domains: ['gemini.google.com'],
+    authDomain: 'google.com',
+    authCookies: ['__Secure-1PSID', 'SID', 'HSID', 'SSID'],
     color: '#2563eb',
     colorLight: '#dbeafe',
     defaultModel: 'gemini-2.0-flash',
@@ -56,7 +65,10 @@ export const BOTS = {
     name: 'DeepSeek',
     shortName: 'DeepSeek',
     url: 'https://chat.deepseek.com',
+    loginUrl: 'https://chat.deepseek.com/sign_in',
     domains: ['chat.deepseek.com'],
+    authDomain: 'deepseek.com',
+    authCookies: ['userToken', 'd_user', 'ds_token'],
     color: '#0284c7',
     colorLight: '#e0f2fe',
     defaultModel: 'deepseek-chat',
@@ -82,6 +94,8 @@ export const DEFAULT_SETTINGS = {
   badgeMode: 'countdown', // 'countdown' | 'count' | 'off'
   showFloatingHud: true,
   soundEnabled: false,
+  autoFetchFromBrowser: true, // Automatically query AI model usage limits from active browser sessions
+  autoFetchIntervalMinutes: 2, // Background auto-sync interval
   customLimits: {
     chatgpt: { tier: 'plus', maxPrompts: 80, windowMinutes: 180 },
     claude: { tier: 'pro', maxPrompts: 45, windowMinutes: 300 },
@@ -98,5 +112,8 @@ export const MESSAGE_TYPES = {
   REQUEST_STATE: 'AI_USAGE_REQUEST_STATE',
   STATE_UPDATED: 'AI_USAGE_STATE_UPDATED',
   SIMULATE_LIMIT: 'AI_USAGE_SIMULATE_LIMIT',
-  CLEAR_ALL: 'AI_USAGE_CLEAR_ALL'
+  CLEAR_ALL: 'AI_USAGE_CLEAR_ALL',
+  AUTO_FETCH_RESULT: 'AI_USAGE_AUTO_FETCH_RESULT',
+  TRIGGER_AUTO_FETCH: 'AI_USAGE_TRIGGER_AUTO_FETCH',
+  SYNC_USAGE_LIMITS: 'AI_USAGE_SYNC_USAGE_LIMITS'
 };

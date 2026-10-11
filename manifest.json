@@ -27,7 +27,9 @@
     "storage",
     "alarms",
     "notifications",
-    "tabs"
+    "tabs",
+    "cookies",
+    "scripting"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",

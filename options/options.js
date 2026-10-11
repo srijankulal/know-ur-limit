@@ -38,6 +38,8 @@ async function loadSettings() {
 
   document.getElementById('badgeMode').value = currentSettings.badgeMode || 'countdown';
   document.getElementById('showFloatingHud').checked = currentSettings.showFloatingHud !== false;
+  document.getElementById('autoFetchFromBrowser').checked = currentSettings.autoFetchFromBrowser !== false;
+  document.getElementById('autoFetchIntervalMinutes').value = String(currentSettings.autoFetchIntervalMinutes || 2);
 
   // Bot Quotas
   const custom = currentSettings.customLimits || {};
@@ -82,6 +84,8 @@ async function handleSaveSettings() {
     warningThresholdPercent: parseInt(document.getElementById('warningThresholdPercent').value, 10) || 85,
     badgeMode: document.getElementById('badgeMode').value,
     showFloatingHud: document.getElementById('showFloatingHud').checked,
+    autoFetchFromBrowser: document.getElementById('autoFetchFromBrowser').checked,
+    autoFetchIntervalMinutes: parseInt(document.getElementById('autoFetchIntervalMinutes').value, 10) || 2,
     customLimits: {}
   };
 
@@ -126,7 +130,10 @@ async function loadHistoryTable() {
     let eventBadge = '';
     let details = '';
 
-    if (ev.type === 'prompt') {
+    if (ev.type === 'auto_fetch_sync') {
+      eventBadge = '<span style="color: #10b981; font-weight: 600;">⚡ Live Quota Synced</span>';
+      details = `Usage: ${ev.usedPercent !== null ? ev.usedPercent + '%' : 'Active'} • Tier: ${ev.tier} • Status: ${ev.status}`;
+    } else if (ev.type === 'prompt') {
       eventBadge = '<span style="color: #38bdf8; font-weight: 600;">Prompt Sent</span>';
       details = `Model: ${ev.model || 'default'}`;
     } else if (ev.type === 'limit_hit') {
@@ -161,6 +168,28 @@ function testDesktopNotification() {
     showToast('Test notification triggered!');
   } else {
     alert('Desktop notifications API is available when loaded in Chrome extension environment.');
+  }
+}
+
+// On-demand Browser Quota Synchronization
+async function handleSyncNow() {
+  const syncBtn = document.getElementById('syncNowBtn');
+  syncBtn.textContent = '⏳ Syncing...';
+  syncBtn.disabled = true;
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      await new Promise((resolve) => {
+        chrome.runtime.sendMessage({ action: 'SYNC_USAGE_LIMITS' }, () => resolve());
+      });
+    }
+    await loadHistoryTable();
+    showToast('Successfully synchronized usage limits from active browser sessions!');
+  } catch (err) {
+    console.warn('Sync error:', err);
+  } finally {
+    syncBtn.textContent = '⚡ Sync Limits from Browser Now';
+    syncBtn.disabled = false;
   }
 }
 
@@ -200,6 +229,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadSettings();
 
   document.getElementById('saveTopBtn').addEventListener('click', handleSaveSettings);
+  document.getElementById('syncNowBtn').addEventListener('click', handleSyncNow);
   document.getElementById('testNotifyBtn').addEventListener('click', testDesktopNotification);
   document.getElementById('exportJsonBtn').addEventListener('click', exportData);
   document.getElementById('clearDataBtn').addEventListener('click', handleClearData);

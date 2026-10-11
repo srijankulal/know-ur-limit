@@ -68,11 +68,18 @@
     } catch (e) {}
   }
 
-  // 3. Listen for state updates broadcasted from background
-  chrome.runtime.onMessage.addListener((message) => {
+  // 3. Listen for state updates and trigger requests from background
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'STATE_UPDATED' && message.data && message.data[currentBotId]) {
       currentBotState = message.data[currentBotId];
       updateHudUI();
+    } else if (message.action === 'TRIGGER_AUTO_FETCH' && (message.botId === currentBotId || !message.botId)) {
+      window.postMessage({
+        source: 'AI_LIMITS_HUB_REQUEST',
+        action: 'TRIGGER_IN_PAGE_FETCH',
+        botId: currentBotId
+      }, '*');
+      if (sendResponse) sendResponse({ success: true, triggered: true });
     }
   });
 
@@ -107,6 +114,10 @@
         <div class="ai-limits-hud-header">
           <span class="ai-limits-hud-title" id="__ai_limits_card_title__">Usage Tracker</span>
           <span class="ai-limits-hud-tier" id="__ai_limits_card_tier__"></span>
+        </div>
+        <div class="ai-limits-hud-dual-stat">
+          <span class="stat-used" id="__ai_limits_used_stat__">Used: 0 msgs</span>
+          <span class="stat-pending" id="__ai_limits_pending_stat__">Pending: 0 msgs</span>
         </div>
         <div class="ai-limits-hud-meter">
           <div class="ai-limits-hud-meter-bar" id="__ai_limits_meter_bar__"></div>
@@ -151,6 +162,8 @@
     const summary = hudElement.querySelector('#__ai_limits_summary__');
     const cardTitle = hudElement.querySelector('#__ai_limits_card_title__');
     const cardTier = hudElement.querySelector('#__ai_limits_card_tier__');
+    const usedStat = hudElement.querySelector('#__ai_limits_used_stat__');
+    const pendingStat = hudElement.querySelector('#__ai_limits_pending_stat__');
     const meterBar = hudElement.querySelector('#__ai_limits_meter_bar__');
     const countText = hudElement.querySelector('#__ai_limits_count_text__');
     const resetText = hudElement.querySelector('#__ai_limits_reset_text__');
@@ -158,49 +171,65 @@
 
     const state = currentBotState;
     const max = state.maxPrompts || 80;
-    const current = (state.prompts || []).length;
-    const pct = Math.min(100, Math.round((current / max) * 100));
+    const usedPct = typeof state.usedPercent === 'number'
+      ? state.usedPercent
+      : Math.min(100, Math.round(((state.prompts || []).length / max) * 100));
+    const pendingPct = Math.max(0, 100 - usedPct);
+
+    const usedCount = typeof state.usedCount === 'number'
+      ? state.usedCount
+      : (typeof state.usedPercent === 'number' ? Math.round((usedPct / 100) * max) : (state.prompts || []).length);
+    const pendingCount = typeof state.pendingCount === 'number'
+      ? state.pendingCount
+      : Math.max(0, max - usedCount);
 
     brand.textContent = state.botId.toUpperCase();
     cardTitle.textContent = `${state.botId.toUpperCase()} Quota`;
     cardTier.textContent = state.tier ? state.tier.toUpperCase() : 'STANDARD';
 
+    if (usedStat) usedStat.textContent = `Used: ${usedCount} (${usedPct}%)`;
+    if (pendingStat) pendingStat.textContent = `Pending: ${pendingCount} (${pendingPct}%)`;
+
     const now = Date.now();
-    const isLimited = state.status === 'limited' || (state.resetsAt && state.resetsAt > now);
+    const isLimited = state.status === 'limited' || (state.resetsAt && state.resetsAt > now && usedPct >= 95);
 
     if (isLimited) {
       indicator.className = 'ai-limits-hud-indicator limited';
       const remainingMs = Math.max(0, (state.resetsAt || now) - now);
-      summary.textContent = `Limited • Resets in ${formatRemainingTime(remainingMs)}`;
-      countText.textContent = `${current}/${max} (Rate Limit Hit)`;
+      summary.textContent = `Limit Hit (${usedCount}/${max}) • Resets ${formatRemainingTime(remainingMs)}`;
+      countText.textContent = `Used: ${usedCount}/${max} • Pending: 0 left`;
       resetText.textContent = `⏳ ${formatRemainingTime(remainingMs)}`;
       meterBar.style.width = '100%';
       meterBar.className = 'ai-limits-hud-meter-bar limited';
       note.textContent = state.limitReason || 'Wait until reset countdown finishes.';
-    } else if (state.status === 'approaching' || pct >= 80) {
+    } else if (state.status === 'approaching' || usedPct >= 80) {
       indicator.className = 'ai-limits-hud-indicator approaching';
       let remainingMs = 0;
-      if (state.prompts.length > 0) {
+      if (state.resetsAt && state.resetsAt > now) {
+        remainingMs = state.resetsAt - now;
+      } else if (state.prompts && state.prompts.length > 0) {
         remainingMs = Math.max(0, (state.prompts[0].timestamp + (state.windowMinutes * 60 * 1000)) - now);
       }
-      summary.textContent = `${current}/${max} msgs (${pct}%)`;
-      countText.textContent = `${current}/${max} msgs used`;
-      resetText.textContent = remainingMs > 0 ? `Earliest slot: ${formatRemainingTime(remainingMs)}` : 'Active';
-      meterBar.style.width = `${pct}%`;
+      summary.textContent = `${usedCount} used • ${pendingCount} pending`;
+      countText.textContent = `Used: ${usedCount}/${max} • Pending: ${pendingCount} left`;
+      resetText.textContent = remainingMs > 0 ? `Reset in: ${formatRemainingTime(remainingMs)}` : 'Active';
+      meterBar.style.width = `${usedPct}%`;
       meterBar.className = 'ai-limits-hud-meter-bar approaching';
-      note.textContent = `Approaching limit for ${state.windowMinutes / 60}h window.`;
+      note.textContent = state.fetchedFromBrowser ? `Live quota: ${usedCount} used, ${pendingCount} pending.` : `Approaching limit for ${Math.round(state.windowMinutes / 60)}h window.`;
     } else {
       indicator.className = 'ai-limits-hud-indicator available';
       let remainingMs = 0;
-      if (state.prompts.length > 0) {
+      if (state.resetsAt && state.resetsAt > now) {
+        remainingMs = state.resetsAt - now;
+      } else if (state.prompts && state.prompts.length > 0) {
         remainingMs = Math.max(0, (state.prompts[0].timestamp + (state.windowMinutes * 60 * 1000)) - now);
       }
-      summary.textContent = `${current}/${max} msgs`;
-      countText.textContent = `${current}/${max} msgs used`;
-      resetText.textContent = remainingMs > 0 ? `Oldest restores: ${formatRemainingTime(remainingMs)}` : 'Full capacity';
-      meterBar.style.width = `${pct}%`;
+      summary.textContent = `${usedCount} used • ${pendingCount} pending`;
+      countText.textContent = `Used: ${usedCount}/${max} • Pending: ${pendingCount} left`;
+      resetText.textContent = remainingMs > 0 ? `Restores: ${formatRemainingTime(remainingMs)}` : 'Full capacity';
+      meterBar.style.width = `${usedPct}%`;
       meterBar.className = 'ai-limits-hud-meter-bar available';
-      note.textContent = `Window: ${Math.round(state.windowMinutes / 60)}h rolling quota.`;
+      note.textContent = state.fetchedFromBrowser ? `Live quota: ${usedCount} used, ${pendingCount} pending.` : `Window: ${Math.round(state.windowMinutes / 60)}h rolling quota.`;
     }
   }
 

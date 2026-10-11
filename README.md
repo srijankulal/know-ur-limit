@@ -13,6 +13,20 @@ Monitor your chat quotas, track message limits, detect rate limits in real-time,
   - **ChatGPT** (`chatgpt.com` & `chat.openai.com`): GPT-4o, o1, o3-mini (Free, Plus ~80 msgs / 3h, Team, Pro).
   - **Google Gemini** (`gemini.google.com`): Gemini 2.0 Flash, Gemini Advanced (Google One AI Premium).
   - **DeepSeek** (`chat.deepseek.com`): DeepSeek V3 / R1 web limits and server peak quotas.
+- **🔒 Automatic Session & Login State Detection**:
+  - **Zero-Friction Auth Status**: Automatically inspects browser cookies for Claude (`sessionKey`), ChatGPT (`__Secure-next-auth.session-token`), Gemini (`SID`/`__Secure-1PSID`), and DeepSeek (`userToken`) to verify whether you are currently logged in.
+  - **1-Click Login Action**: If you are not logged in, Know Ur Limit immediately shows a `🔒 Login Needed` status chip, an explanatory callout, and a prominent `🔑 Log In` button to jump straight to the provider's sign-in page.
+  - **Real-Time Reactive Cookie Watcher**: Listens for login and logout events in real-time — as soon as you sign in to any provider in Chrome, Know Ur Limit instantly switches to `⚡ Live` and begins fetching your actual rate limits.
+- **⚡ Live Quota Fetching & Dual Used vs. Pending Metrics**:
+  - **Live Fetch from Active Bots**: Directly interrogates browser sessions on Claude, ChatGPT, Gemini, and DeepSeek to read real-time window consumption and remaining message caps without requiring API keys or manual counts.
+  - **Dual Used & Pending Breakdown**:
+    - **USED Quota**: Clear amber badge showing exactly how many prompts have been consumed (e.g., `16 / 45 msgs • 35% of limit`).
+    - **PENDING Quota**: Emerald green badge showing remaining prompt capacity before hitting rate limits (e.g., `29 msgs left • 65% remaining`).
+    - **Global Overview**: Quick header bar summarizing **Total Used** and **Total Pending** across all configured bots.
+  - **Claude Live Telemetry**: Queries Claude's organization endpoint (`/api/organizations/{id}/usage`) to read live 5-hour rolling utilization percentages (e.g., `35%`) and 7-day weekly usage, along with exact `resets_at` timestamps.
+  - **ChatGPT Live Telemetry**: Queries session tokens and `/backend-api/wham/usage` (including mandatory `ChatGPT-Account-Id`) / account checks to read real rate limit windows, primary window usage percentages, and seconds until reset.
+  - **Google Gemini & DeepSeek**: Detects authenticated accounts, plan tiers (Gemini Advanced vs. Standard), and usage limits.
+  - **Instant & Scheduled Auto-Sync**: Automatically synchronizes on extension popup open, when visiting or typing in chat tabs, or on a configurable 2-minute background schedule.
 - **Deep Network & DOM Telemetry**:
   - **Network Interceptor (MAIN World)**: Captures HTTP `429 Too Many Requests`, `resets_at` timestamps, `clears_in` seconds, and subscription tiers (`pro`, `plus`, `advanced`, `free`) directly from official API responses.
   - **DOM Observer**: Continually monitors chat containers for warning messages like *"You have 5 messages remaining until 3:00 PM"* or *"You've reached your usage limit until 4:15 PM"*.
@@ -30,7 +44,7 @@ Monitor your chat quotas, track message limits, detect rate limits in real-time,
 - **Toolbar Badge Counter**:
   - Glance at your browser toolbar to see remaining cooldown minutes (e.g., `15m` in red) or active status.
 - **In-Page Floating Status HUD**:
-  - Optional subtle glassmorphism pill in the corner of your chat page showing message count and time until reset.
+  - In-page glassmorphism widget showing live **Used** and **Pending** counts directly in the corner of your chat page.
 - **100% Private & Local**:
   - Runs entirely in your browser using `chrome.storage.local`. No external analytics, no telemetry, no tracking, and no API keys required.
 

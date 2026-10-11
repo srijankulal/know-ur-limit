@@ -95,7 +95,32 @@
           </div>
         </div>
 
-        <div class="test-action-row">
+        <div class="setting-row">
+          <div class="setting-info">
+            <label for="autoFetchFromBrowser">Auto-Fetch Limits from Browser</label>
+            <span class="setting-desc">Automatically fetch real-time quota limits, plan tiers, and cooldowns from active browser sessions.</span>
+          </div>
+          <div class="setting-control">
+            <input type="checkbox" id="autoFetchFromBrowser" class="toggle-switch">
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <label for="autoFetchIntervalMinutes">Auto-Sync Interval</label>
+            <span class="setting-desc">How frequently background checks and synchronizes active chat models.</span>
+          </div>
+          <div class="setting-control">
+            <select id="autoFetchIntervalMinutes" class="form-select">
+              <option value="1">Every 1 minute</option>
+              <option value="2">Every 2 minutes (Recommended)</option>
+              <option value="5">Every 5 minutes</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="test-action-row" style="display: flex; gap: 8px;">
+          <button id="syncNowBtn" class="btn btn-primary">⚡ Sync Limits from Browser Now</button>
           <button id="testNotifyBtn" class="btn btn-secondary">Test Desktop Notification</button>
         </div>
       </section>
