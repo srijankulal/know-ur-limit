@@ -1,5 +1,5 @@
 /**
- * AI Usage Limits Hub - Options & Configuration Controller
+ * Know Ur Limit - Options & Configuration Controller
  */
 
 import { BOTS } from '../shared/constants.js';
@@ -16,11 +16,9 @@ function showToast(message = 'Settings saved successfully!') {
   }, 2500);
 }
 
-// Load settings into form fields
 async function loadSettings() {
   currentSettings = await getSettings();
 
-  // Toggles & Selects
   document.getElementById('notifyOnReset').checked = !!currentSettings.notifyOnReset;
   document.getElementById('notifyOnLimit').checked = !!currentSettings.notifyOnLimit;
   document.getElementById('notifyOnApproaching').checked = currentSettings.notifyOnApproaching !== false;
@@ -41,41 +39,9 @@ async function loadSettings() {
   document.getElementById('autoFetchFromBrowser').checked = currentSettings.autoFetchFromBrowser !== false;
   document.getElementById('autoFetchIntervalMinutes').value = String(currentSettings.autoFetchIntervalMinutes || 2);
 
-  // Bot Quotas
-  const custom = currentSettings.customLimits || {};
-
-  for (const botId of Object.keys(BOTS)) {
-    const botDef = BOTS[botId];
-    const botCustom = custom[botId] || {};
-    const defaultTierKey = Object.keys(botDef.tiers)[0];
-    const tier = botCustom.tier || defaultTierKey;
-    const tierDef = botDef.tiers[tier] || Object.values(botDef.tiers)[0];
-
-    const tierEl = document.getElementById(`tier_${botId}`);
-    const maxEl = document.getElementById(`max_${botId}`);
-    const winEl = document.getElementById(`window_${botId}`);
-
-    if (tierEl) tierEl.value = tier;
-    if (maxEl) maxEl.value = botCustom.maxPrompts || tierDef.defaultMax;
-    if (winEl) winEl.value = botCustom.windowMinutes || tierDef.windowMinutes;
-
-    // Auto-update max/window when tier select changes
-    if (tierEl) {
-      tierEl.addEventListener('change', () => {
-        const selectedTier = tierEl.value;
-        const newTierDef = botDef.tiers[selectedTier];
-        if (newTierDef) {
-          if (maxEl) maxEl.value = newTierDef.defaultMax;
-          if (winEl) winEl.value = newTierDef.windowMinutes;
-        }
-      });
-    }
-  }
-
   await loadHistoryTable();
 }
 
-// Save form values to storage
 async function handleSaveSettings() {
   const updatedSettings = {
     notifyOnReset: document.getElementById('notifyOnReset').checked,
@@ -85,25 +51,11 @@ async function handleSaveSettings() {
     badgeMode: document.getElementById('badgeMode').value,
     showFloatingHud: document.getElementById('showFloatingHud').checked,
     autoFetchFromBrowser: document.getElementById('autoFetchFromBrowser').checked,
-    autoFetchIntervalMinutes: parseInt(document.getElementById('autoFetchIntervalMinutes').value, 10) || 2,
-    customLimits: {}
+    autoFetchIntervalMinutes: parseInt(document.getElementById('autoFetchIntervalMinutes').value, 10) || 2
   };
-
-  for (const botId of Object.keys(BOTS)) {
-    const tierEl = document.getElementById(`tier_${botId}`);
-    const maxEl = document.getElementById(`max_${botId}`);
-    const winEl = document.getElementById(`window_${botId}`);
-
-    updatedSettings.customLimits[botId] = {
-      tier: tierEl ? tierEl.value : 'free',
-      maxPrompts: maxEl ? parseInt(maxEl.value, 10) || 50 : 50,
-      windowMinutes: winEl ? parseInt(winEl.value, 10) || 180 : 180
-    };
-  }
 
   await saveSettings(updatedSettings);
 
-  // Sync state with background worker
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
     chrome.runtime.sendMessage({ action: 'GET_ALL_STATES' }, () => {});
   }
@@ -111,14 +63,13 @@ async function handleSaveSettings() {
   showToast('Settings saved successfully!');
 }
 
-// Populate recent history events
 async function loadHistoryTable() {
   const events = await getHistoryEvents();
   const tbody = document.getElementById('historyTableBody');
   tbody.innerHTML = '';
 
   if (!events || events.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty-cell">No recent events recorded yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="empty-cell">No recent telemetry events recorded yet.</td></tr>';
     return;
   }
 
@@ -131,11 +82,12 @@ async function loadHistoryTable() {
     let details = '';
 
     if (ev.type === 'auto_fetch_sync') {
-      eventBadge = '<span style="color: #10b981; font-weight: 600;">⚡ Live Quota Synced</span>';
-      details = `Usage: ${ev.usedPercent !== null ? ev.usedPercent + '%' : 'Active'} • Tier: ${ev.tier} • Status: ${ev.status}`;
-    } else if (ev.type === 'prompt') {
-      eventBadge = '<span style="color: #38bdf8; font-weight: 600;">Prompt Sent</span>';
-      details = `Model: ${ev.model || 'default'}`;
+      eventBadge = '<span style="color: #10b981; font-weight: 600;">⚡ Live Telemetry Synced</span>';
+      const pctPart = ev.usedPercent !== null && ev.usedPercent !== undefined ? `Quota: ${ev.usedPercent}% used` : '';
+      const tokPart = typeof ev.tokensUsed === 'number'
+        ? `Tokens: ${ev.tokensUsed.toLocaleString()} used / ${(ev.tokensRemaining ?? 0).toLocaleString()} left`
+        : '';
+      details = [pctPart, tokPart, `Plan: ${ev.tier || 'Standard'}`].filter(Boolean).join(' • ');
     } else if (ev.type === 'limit_hit') {
       eventBadge = '<span style="color: #f87171; font-weight: 600;">Limit Hit</span>';
       const resetsStr = ev.resetsAt ? new Date(ev.resetsAt).toLocaleTimeString() : 'N/A';
@@ -155,13 +107,12 @@ async function loadHistoryTable() {
   }
 }
 
-// Test Notification
 function testDesktopNotification() {
   if (typeof chrome !== 'undefined' && chrome.notifications) {
     chrome.notifications.create(`test_notify_${Date.now()}`, {
       type: 'basic',
       iconUrl: '../icons/icon128.png',
-      title: '🎉 AI Limit Hub - Alert Test',
+      title: '🎉 Know Ur Limit - Alert Test',
       message: 'System notifications are functioning properly! You will receive alerts when limits reset.',
       priority: 2
     });
@@ -171,29 +122,27 @@ function testDesktopNotification() {
   }
 }
 
-// On-demand Browser Quota Synchronization
 async function handleSyncNow() {
   const syncBtn = document.getElementById('syncNowBtn');
-  syncBtn.textContent = '⏳ Syncing...';
+  syncBtn.textContent = '⏳ Syncing real usage & tokens...';
   syncBtn.disabled = true;
 
   try {
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
       await new Promise((resolve) => {
-        chrome.runtime.sendMessage({ action: 'SYNC_USAGE_LIMITS' }, () => resolve());
+        chrome.runtime.sendMessage({ action: 'SYNC_USAGE_LIMITS', data: { allowTempTab: true } }, () => resolve());
       });
     }
     await loadHistoryTable();
-    showToast('Successfully synchronized usage limits from active browser sessions!');
+    showToast('Synchronized real usage limits & tokens from browser sessions!');
   } catch (err) {
     console.warn('Sync error:', err);
   } finally {
-    syncBtn.textContent = '⚡ Sync Limits from Browser Now';
+    syncBtn.textContent = '⚡ Sync Real Limits & Tokens Now';
     syncBtn.disabled = false;
   }
 }
 
-// Export JSON
 async function exportData() {
   const states = await getAllBotStates();
   const settings = await getSettings();
@@ -210,21 +159,19 @@ async function exportData() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `ai-limits-export-${Date.now()}.json`;
+  a.download = `know-ur-limit-telemetry-${Date.now()}.json`;
   a.click();
   URL.revokeObjectURL(url);
 }
 
-// Clear all data
 async function handleClearData() {
-  if (confirm('Are you sure you want to clear all usage metrics and history?')) {
+  if (confirm('Are you sure you want to reset stored telemetry and history?')) {
     await clearAllData();
     await loadSettings();
-    showToast('All usage metrics cleared.');
+    showToast('Stored telemetry cleared.');
   }
 }
 
-// Event Listeners
 document.addEventListener('DOMContentLoaded', () => {
   loadSettings();
 

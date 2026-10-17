@@ -1,18 +1,17 @@
 /**
- * AI Usage Limits Hub - Storage & State Management
+ * Know Ur Limit - Storage & Real Telemetry State Management
+ * Stores only real usage limits, rate-limit windows, and token telemetry fetched from each chatbot.
+ * Zero assumed message counts or fake prompt reconstructions.
  */
 
 import { BOTS, STATUS, DEFAULT_SETTINGS } from './constants.js';
 
 const STORAGE_KEYS = {
-  BOTS_STATE: 'ai_limits_bots_state_v1',
-  SETTINGS: 'ai_limits_settings_v1',
-  HISTORY: 'ai_limits_history_v1'
+  BOTS_STATE: 'ai_limits_bots_state_v2',
+  SETTINGS: 'ai_limits_settings_v2',
+  HISTORY: 'ai_limits_history_v2'
 };
 
-/**
- * Low-level storage adapter with fallback to localStorage and in-memory Map
- */
 const inMemoryStore = new Map();
 
 const storageAdapter = {
@@ -50,17 +49,11 @@ const storageAdapter = {
   }
 };
 
-/**
- * Get extension settings
- */
 export async function getSettings() {
   const settings = await storageAdapter.get(STORAGE_KEYS.SETTINGS);
   return { ...DEFAULT_SETTINGS, ...(settings || {}) };
 }
 
-/**
- * Save extension settings
- */
 export async function saveSettings(newSettings) {
   const current = await getSettings();
   const merged = { ...current, ...newSettings };
@@ -69,108 +62,93 @@ export async function saveSettings(newSettings) {
 }
 
 /**
- * Initialize default bot state
+ * Initialize clean bot state without any assumed message limits
  */
-function createDefaultBotState(botId, settings) {
+function createDefaultBotState(botId) {
   const botDef = BOTS[botId];
-  const custom = settings?.customLimits?.[botId] || {};
-  const tierKey = custom.tier || Object.keys(botDef.tiers)[0];
-  const tierDef = botDef.tiers[tierKey] || Object.values(botDef.tiers)[0];
-  const maxPrompts = custom.maxPrompts || tierDef.defaultMax;
+  const tierKey = Object.keys(botDef.tiers)[0];
+  const tierDef = botDef.tiers[tierKey];
 
   return {
     botId,
     tier: tierKey,
-    maxPrompts,
-    windowMinutes: custom.windowMinutes || tierDef.windowMinutes,
+    tierLabel: tierDef?.label || botDef.name,
     status: STATUS.UNKNOWN,
-    prompts: [],
+    activeModel: botDef.defaultModel,
+    // Real rate-limit window utilization (from provider API)
+    usedPercent: null,
+    remainingPercent: null,
+    // Real token telemetry (fetched from provider API / active session)
+    tokensUsed: null,
+    inputTokens: null,
+    outputTokens: null,
+    tokenLimit: botDef.defaultContextTokens || null,
+    tokensRemaining: null,
+    tokenSource: null,
+    // Normalized real quota windows (e.g. Claude 5h/7d, ChatGPT primary/secondary, DeepSeek quotas)
+    windows: [],
+    quotaWindows: null,
     resetsAt: null,
     limitReason: '',
     lastSeen: null,
-    activeModel: botDef.defaultModel,
-    // Live usage tracking (how much used & how much pending)
-    usedCount: 0,
-    pendingCount: maxPrompts,
-    usedPercent: 0,
-    pendingPercent: 100,
-    liveUtilizationPercent: null,
-    // Auto-fetch telemetry fields
+    // Sync metadata
     fetchedFromBrowser: false,
+    hasRealTelemetry: false,
     lastFetchedAt: null,
-    quotaWindows: null,
     isLoggedIn: false,
     accountEmail: null,
-    fetchStatus: 'idle' // 'idle' | 'synced' | 'login_required' | 'error' | 'tab_required'
+    conversationTitle: null,
+    fetchStatus: 'idle' // 'idle' | 'synced' | 'login_required' | 'tab_required' | 'error'
   };
 }
 
 /**
- * Clean up expired prompts outside the rolling window
- */
-function purgeExpiredPrompts(state, now = Date.now()) {
-  const windowMs = (state.windowMinutes || 180) * 60 * 1000;
-  const cutoff = now - windowMs;
-  state.prompts = (state.prompts || []).filter(p => p.timestamp >= cutoff);
-  return state;
-}
-
-/**
- * Re-evaluate bot status (e.g., checks if limit countdown has expired)
+ * Re-evaluate bot status based on real fetched usage & reset timestamps
  */
 function evaluateStatus(state, now = Date.now(), thresholdPercent = 85) {
-  // If not logged in and marked as login_required, status is UNKNOWN
   if (!state.isLoggedIn && state.fetchStatus === 'login_required') {
     state.status = STATUS.UNKNOWN;
     return state;
   }
 
-  // If explicitly limited, check if resetsAt has passed
-  if (state.status === STATUS.LIMITED) {
-    if (state.resetsAt && state.resetsAt <= now) {
-      state.status = STATUS.AVAILABLE;
-      state.resetsAt = null;
-      state.limitReason = '';
-      state.lastApproachingAlertTs = null;
-      state.liveUtilizationPercent = null;
-      state.prompts = [];
+  // Check if a previously active cooldown timer has expired
+  if (state.status === STATUS.LIMITED && state.resetsAt && state.resetsAt <= now) {
+    state.status = STATUS.AVAILABLE;
+    state.resetsAt = null;
+    state.limitReason = '';
+    state.lastApproachingAlertTs = null;
+    if (state.usedPercent !== null && state.usedPercent >= 100) {
       state.usedPercent = 0;
-      state.pendingPercent = 100;
-      state.usedCount = 0;
-      state.pendingCount = state.maxPrompts || 80;
-    } else {
-      return state;
+      state.remainingPercent = 100;
     }
   }
 
-  purgeExpiredPrompts(state, now);
-  const count = state.prompts.length;
-  const max = state.maxPrompts || 80;
-
-  // Use live utilization percentage from server API if available, else derive from prompts
-  if (typeof state.liveUtilizationPercent === 'number' && state.liveUtilizationPercent !== null) {
-    state.usedPercent = Math.min(100, Math.max(0, state.liveUtilizationPercent));
-    state.usedCount = Math.min(max, Math.round((state.usedPercent / 100) * max));
-    state.pendingCount = Math.max(0, max - state.usedCount);
-  } else {
-    state.usedPercent = Math.min(100, Math.round((count / max) * 100));
-    state.usedCount = count;
-    state.pendingCount = Math.max(0, max - count);
+  // Compute remaining tokens if tokensUsed and tokenLimit are present
+  if (typeof state.tokensUsed === 'number' && typeof state.tokenLimit === 'number' && state.tokenLimit > 0) {
+    state.tokensRemaining = Math.max(0, state.tokenLimit - state.tokensUsed);
   }
-  state.pendingPercent = Math.max(0, 100 - state.usedPercent);
 
-  if (state.usedCount >= max || state.usedPercent >= 100) {
+  // Determine effective usage percentage from real window % or real token usage %
+  let effectivePct = null;
+  if (typeof state.usedPercent === 'number' && !isNaN(state.usedPercent)) {
+    effectivePct = Math.min(100, Math.max(0, state.usedPercent));
+    state.usedPercent = effectivePct;
+    state.remainingPercent = Math.max(0, Number((100 - effectivePct).toFixed(1)));
+  } else if (typeof state.tokensUsed === 'number' && typeof state.tokenLimit === 'number' && state.tokenLimit > 0) {
+    effectivePct = Math.min(100, Math.max(0, Math.round((state.tokensUsed / state.tokenLimit) * 1000) / 10));
+    state.usedPercent = effectivePct;
+    state.remainingPercent = Math.max(0, Number((100 - effectivePct).toFixed(1)));
+  }
+
+  if (state.status === STATUS.LIMITED && (!state.resetsAt || state.resetsAt > now)) {
+    return state;
+  }
+
+  if (effectivePct !== null && effectivePct >= 100) {
     state.status = STATUS.LIMITED;
-    // Calculate reset time based on the oldest prompt expiry
-    if (!state.resetsAt && state.prompts.length > 0) {
-      const oldestPromptTime = state.prompts[0].timestamp;
-      const windowMs = (state.windowMinutes || 180) * 60 * 1000;
-      state.resetsAt = oldestPromptTime + windowMs;
-      state.limitReason = `Rolling quota reached (${state.usedCount}/${max} prompts).`;
-    }
-  } else if (state.usedPercent >= thresholdPercent) {
+  } else if (effectivePct !== null && effectivePct >= thresholdPercent) {
     state.status = STATUS.APPROACHING;
-  } else if (state.isLoggedIn || state.lastSeen) {
+  } else if (state.isLoggedIn) {
     state.status = STATUS.AVAILABLE;
   } else {
     state.status = STATUS.UNKNOWN;
@@ -184,13 +162,13 @@ function evaluateStatus(state, now = Date.now(), thresholdPercent = 85) {
  */
 export async function getAllBotStates() {
   const settings = await getSettings();
-  let states = await storageAdapter.get(STORAGE_KEYS.BOTS_STATE) || {};
+  let states = (await storageAdapter.get(STORAGE_KEYS.BOTS_STATE)) || {};
   const now = Date.now();
   let updated = false;
 
   for (const botId of Object.keys(BOTS)) {
     if (!states[botId]) {
-      states[botId] = createDefaultBotState(botId, settings);
+      states[botId] = createDefaultBotState(botId);
       updated = true;
     } else {
       const beforeStatus = states[botId].status;
@@ -218,68 +196,9 @@ export async function getBotState(botId) {
 }
 
 /**
- * Record a prompt sent by user with approaching limit check
+ * Record a hard rate limit detected from network (HTTP 429) or DOM banner
  */
-export async function recordPromptSent(botId, model = null) {
-  const settings = await getSettings();
-  const all = await getAllBotStates();
-  const state = all[botId];
-  if (!state) return null;
-
-  const now = Date.now();
-  state.lastSeen = now;
-  state.isLoggedIn = true;
-  state.fetchStatus = 'synced';
-  if (model) state.activeModel = model;
-
-  purgeExpiredPrompts(state, now);
-  state.prompts.push({
-    timestamp: now,
-    model: model || state.activeModel
-  });
-
-  const max = state.maxPrompts || 80;
-  // If we had a liveUtilizationPercent from the provider, also reflect this prompt
-  if (typeof state.liveUtilizationPercent === 'number' && state.liveUtilizationPercent !== null) {
-    const promptIncrement = (1 / max) * 100;
-    state.liveUtilizationPercent = Math.min(100, Math.round(state.liveUtilizationPercent + promptIncrement));
-  }
-
-  const threshold = settings.warningThresholdPercent || 85;
-  evaluateStatus(state, now, threshold);
-
-  const count = state.usedCount;
-  const pct = state.usedPercent;
-
-  // Check if we hit the warning threshold (e.g. 85%)
-  let approachingTriggered = false;
-  const windowMs = (state.windowMinutes || 180) * 60 * 1000;
-  if (pct >= threshold && state.status !== STATUS.LIMITED) {
-    if (!state.lastApproachingAlertTs || (now - state.lastApproachingAlertTs) >= windowMs) {
-      state.lastApproachingAlertTs = now;
-      approachingTriggered = true;
-    }
-  }
-
-  all[botId] = state;
-  await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, all);
-
-  // Append to history log
-  await logHistoryEvent({
-    type: approachingTriggered ? 'approaching_limit' : 'prompt',
-    botId,
-    model: model || state.activeModel,
-    pct,
-    timestamp: now
-  });
-
-  return { state, approachingTriggered, percentage: pct, remaining: Math.max(0, max - count) };
-}
-
-/**
- * Record a hard rate limit detected from network or DOM
- */
-export async function recordLimitDetected(botId, { resetsAt, reason, model, plan } = {}) {
+export async function recordLimitDetected(botId, { resetsAt, reason, model, plan, tokensUsed, tokenLimit } = {}) {
   const all = await getAllBotStates();
   const state = all[botId];
   if (!state) return null;
@@ -288,15 +207,21 @@ export async function recordLimitDetected(botId, { resetsAt, reason, model, plan
   state.lastSeen = now;
   state.isLoggedIn = true;
   state.status = STATUS.LIMITED;
-  state.resetsAt = resetsAt || (now + (state.windowMinutes || 180) * 60 * 1000);
+  if (resetsAt) state.resetsAt = resetsAt;
   state.limitReason = reason || 'Rate limit reached';
-  state.liveUtilizationPercent = 100;
   state.usedPercent = 100;
-  state.pendingPercent = 0;
-  state.usedCount = state.maxPrompts || 80;
-  state.pendingCount = 0;
+  state.remainingPercent = 0;
+  state.hasRealTelemetry = true;
   if (model) state.activeModel = model;
-  if (plan) state.tier = plan;
+  if (plan && BOTS[botId]?.tiers[plan]) {
+    state.tier = plan;
+    state.tierLabel = BOTS[botId].tiers[plan].label;
+  }
+  if (typeof tokensUsed === 'number') state.tokensUsed = tokensUsed;
+  if (typeof tokenLimit === 'number') state.tokenLimit = tokenLimit;
+  if (typeof state.tokensUsed === 'number' && typeof state.tokenLimit === 'number') {
+    state.tokensRemaining = Math.max(0, state.tokenLimit - state.tokensUsed);
+  }
 
   all[botId] = state;
   await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, all);
@@ -313,7 +238,7 @@ export async function recordLimitDetected(botId, { resetsAt, reason, model, plan
 }
 
 /**
- * Record live usage limit auto-fetched directly from browser session
+ * Record real usage & token telemetry fetched directly from the chatbot session
  */
 export async function recordAutoFetchedUsage(botId, data = {}) {
   const settings = await getSettings();
@@ -324,41 +249,85 @@ export async function recordAutoFetchedUsage(botId, data = {}) {
   const now = Date.now();
   state.lastSeen = now;
 
-  // Handle explicit not-logged-in case
+  // Explicit not-logged-in state
   if (data.isLoggedIn === false) {
     state.isLoggedIn = false;
     state.fetchStatus = 'login_required';
     state.fetchedFromBrowser = false;
+    state.hasRealTelemetry = false;
     state.status = STATUS.UNKNOWN;
-    state.liveUtilizationPercent = null;
+    state.usedPercent = null;
+    state.remainingPercent = null;
+    state.tokensUsed = null;
+    state.tokensRemaining = null;
+    state.windows = [];
     if (data.limitReason) state.limitReason = data.limitReason;
     all[botId] = state;
     await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, all);
     return state;
   }
 
-  state.lastFetchedAt = now;
   state.isLoggedIn = true;
-  state.fetchedFromBrowser = true;
   state.fetchStatus = data.fetchStatus || 'synced';
 
-  if (data.accountEmail) {
-    state.accountEmail = data.accountEmail;
-  }
-  if (data.activeModel) {
-    state.activeModel = data.activeModel;
-  }
+  if (data.accountEmail) state.accountEmail = data.accountEmail;
+  if (data.activeModel) state.activeModel = data.activeModel;
+  if (data.conversationTitle !== undefined) state.conversationTitle = data.conversationTitle;
 
-  // Update plan tier if detected from browser
+  // Update tier & context limit if detected
   if (data.tier && BOTS[botId]?.tiers[data.tier]) {
     state.tier = data.tier;
     const tierDef = BOTS[botId].tiers[data.tier];
-    const custom = settings?.customLimits?.[botId];
-    state.maxPrompts = custom?.maxPrompts || tierDef.defaultMax;
-    state.windowMinutes = custom?.windowMinutes || tierDef.windowMinutes;
+    state.tierLabel = data.tierLabel || tierDef.label;
+    if (!data.tokenLimit && tierDef.contextTokens) {
+      state.tokenLimit = tierDef.contextTokens;
+    }
+  } else if (data.tierLabel) {
+    state.tierLabel = data.tierLabel;
   }
 
-  // Update quota windows (e.g., Claude's 5-hour and 7-day quotas, ChatGPT windows)
+  // Update model-specific token limit if known
+  if (typeof data.tokenLimit === 'number' && data.tokenLimit > 0) {
+    state.tokenLimit = data.tokenLimit;
+  } else if (state.activeModel && BOTS[botId]?.modelContextLimits) {
+    const modelMap = BOTS[botId].modelContextLimits;
+    for (const [mKey, limitVal] of Object.entries(modelMap)) {
+      if (state.activeModel.toLowerCase().includes(mKey)) {
+        state.tokenLimit = limitVal;
+        break;
+      }
+    }
+  }
+
+  // Update real token telemetry
+  if (typeof data.tokensUsed === 'number' && !isNaN(data.tokensUsed)) {
+    state.tokensUsed = Math.max(0, Math.round(data.tokensUsed));
+    state.hasRealTelemetry = true;
+    state.fetchedFromBrowser = true;
+    state.lastFetchedAt = now;
+  }
+  if (typeof data.inputTokens === 'number' && !isNaN(data.inputTokens)) {
+    state.inputTokens = Math.max(0, Math.round(data.inputTokens));
+  }
+  if (typeof data.outputTokens === 'number' && !isNaN(data.outputTokens)) {
+    state.outputTokens = Math.max(0, Math.round(data.outputTokens));
+  }
+  if (typeof data.tokensRemaining === 'number' && !isNaN(data.tokensRemaining)) {
+    state.tokensRemaining = Math.max(0, Math.round(data.tokensRemaining));
+  } else if (typeof state.tokensUsed === 'number' && typeof state.tokenLimit === 'number' && state.tokenLimit > 0) {
+    state.tokensRemaining = Math.max(0, state.tokenLimit - state.tokensUsed);
+  }
+  if (data.tokenSource) {
+    state.tokenSource = data.tokenSource;
+  }
+
+  // Update real quota windows
+  if (Array.isArray(data.windows) && data.windows.length > 0) {
+    state.windows = data.windows;
+    state.hasRealTelemetry = true;
+    state.fetchedFromBrowser = true;
+    state.lastFetchedAt = now;
+  }
   if (data.quotaWindows) {
     state.quotaWindows = data.quotaWindows;
   }
@@ -368,64 +337,59 @@ export async function recordAutoFetchedUsage(botId, data = {}) {
     state.resetsAt = data.resetsAt;
   }
 
-  // Update used & pending quota numbers
-  const max = state.maxPrompts || 80;
-  if (typeof data.usedCount === 'number' && typeof data.pendingCount === 'number') {
-    state.usedCount = Math.max(0, Math.round(data.usedCount));
-    state.pendingCount = Math.max(0, Math.round(data.pendingCount));
-    state.usedPercent = Math.min(100, Math.round((state.usedCount / max) * 100));
-    state.pendingPercent = Math.max(0, 100 - state.usedPercent);
-    state.liveUtilizationPercent = state.usedPercent;
-  } else if (typeof data.usedPercent === 'number' && !isNaN(data.usedPercent)) {
-    const rawPct = Math.min(100, Math.max(0, Math.round(data.usedPercent)));
-    state.liveUtilizationPercent = rawPct;
-    state.usedPercent = rawPct;
-    state.pendingPercent = Math.max(0, 100 - rawPct);
-    state.usedCount = Math.min(max, Math.round((rawPct / 100) * max));
-    state.pendingCount = Math.max(0, max - state.usedCount);
-
-    // Reconstruct prompt markers so count is consistent with percentage
-    const targetCount = state.usedCount;
-    const windowMs = (state.windowMinutes || 180) * 60 * 1000;
-    const oldestTs = state.resetsAt ? Math.max(now - windowMs, state.resetsAt - windowMs) : (now - (windowMs / 2));
-
-    state.prompts = [];
-    for (let i = 0; i < targetCount; i++) {
-      state.prompts.push({
-        timestamp: oldestTs + Math.floor((i / Math.max(1, targetCount)) * (now - oldestTs)),
-        model: state.activeModel,
-        autoFetched: true
-      });
-    }
+  // Update real usage percentage
+  if (typeof data.usedPercent === 'number' && !isNaN(data.usedPercent)) {
+    const cleanPct = Math.min(100, Math.max(0, Number(data.usedPercent.toFixed(1))));
+    state.usedPercent = cleanPct;
+    state.remainingPercent = Math.max(0, Number((100 - cleanPct).toFixed(1)));
+    state.hasRealTelemetry = true;
+    state.fetchedFromBrowser = true;
+    state.lastFetchedAt = now;
+  } else if (typeof state.tokensUsed === 'number' && typeof state.tokenLimit === 'number' && state.tokenLimit > 0 && state.usedPercent === null) {
+    const tokenPct = Math.min(100, Math.max(0, Number(((state.tokensUsed / state.tokenLimit) * 100).toFixed(1))));
+    state.usedPercent = tokenPct;
+    state.remainingPercent = Math.max(0, Number((100 - tokenPct).toFixed(1)));
   }
 
   if (data.limitReason) {
     state.limitReason = data.limitReason;
   }
 
-  // Evaluate status
+  // Evaluate status & approaching threshold alert
   const threshold = settings.warningThresholdPercent || 85;
-  if (data.isLimited || state.usedPercent >= 100 || (state.resetsAt && state.resetsAt > now && state.usedPercent >= 95)) {
+  if (data.isLimited || (state.usedPercent !== null && state.usedPercent >= 100)) {
     state.status = STATUS.LIMITED;
-    if (!state.limitReason) state.limitReason = `${BOTS[botId]?.name || 'AI'} rate limit hit.`;
-  } else if (state.usedPercent >= threshold) {
-    state.status = STATUS.APPROACHING;
+    if (!state.limitReason) state.limitReason = `${BOTS[botId]?.name || 'AI'} usage limit reached.`;
   } else {
-    state.status = STATUS.AVAILABLE;
+    evaluateStatus(state, now, threshold);
+  }
+
+  let approachingTriggered = false;
+  if (state.status === STATUS.APPROACHING && state.usedPercent !== null && state.usedPercent >= threshold) {
+    const cooldownAlertWindow = 3 * 3600 * 1000;
+    if (!state.lastApproachingAlertTs || (now - state.lastApproachingAlertTs) >= cooldownAlertWindow) {
+      state.lastApproachingAlertTs = now;
+      approachingTriggered = true;
+    }
   }
 
   all[botId] = state;
   await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, all);
 
-  await logHistoryEvent({
-    type: 'auto_fetch_sync',
-    botId,
-    usedPercent: state.usedPercent,
-    tier: state.tier,
-    status: state.status,
-    timestamp: now
-  });
+  if (state.hasRealTelemetry) {
+    await logHistoryEvent({
+      type: 'auto_fetch_sync',
+      botId,
+      usedPercent: state.usedPercent,
+      tokensUsed: state.tokensUsed,
+      tokensRemaining: state.tokensRemaining,
+      tier: state.tierLabel || state.tier,
+      status: state.status,
+      timestamp: now
+    });
+  }
 
+  state._approachingTriggered = approachingTriggered;
   return state;
 }
 
@@ -449,38 +413,6 @@ export async function clearLimit(botId) {
 }
 
 /**
- * Directly update custom limits for a bot (max prompts, window duration, tier)
- */
-export async function updateBotCustomLimit(botId, { maxPrompts, windowMinutes, tier } = {}) {
-  const all = await getAllBotStates();
-  const state = all[botId];
-  if (!state) return null;
-
-  if (maxPrompts !== undefined && Number(maxPrompts) > 0) {
-    state.maxPrompts = Number(maxPrompts);
-  }
-  if (windowMinutes !== undefined && Number(windowMinutes) > 0) {
-    state.windowMinutes = Number(windowMinutes);
-  }
-  if (tier) {
-    state.tier = tier;
-  }
-
-  const settings = await getSettings();
-  if (!settings.customLimits) settings.customLimits = {};
-  settings.customLimits[botId] = {
-    tier: state.tier,
-    maxPrompts: state.maxPrompts,
-    windowMinutes: state.windowMinutes
-  };
-  await saveSettings(settings);
-
-  all[botId] = evaluateStatus(state, Date.now(), settings.warningThresholdPercent || 85);
-  await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, all);
-  return state;
-}
-
-/**
  * Update user plan/tier for a bot
  */
 export async function updateBotPlan(botId, tierKey) {
@@ -491,9 +423,11 @@ export async function updateBotPlan(botId, tierKey) {
 
   const tierDef = botDef.tiers[tierKey];
   state.tier = tierKey;
-  state.maxPrompts = tierDef.defaultMax;
-  state.windowMinutes = tierDef.windowMinutes;
-  
+  state.tierLabel = tierDef.label;
+  if (tierDef.contextTokens) {
+    state.tokenLimit = tierDef.contextTokens;
+  }
+
   evaluateStatus(state, Date.now());
   all[botId] = state;
   await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, all);
@@ -512,8 +446,9 @@ export async function updateBotHeartbeat(botId, extra = {}) {
   if (extra.activeModel) state.activeModel = extra.activeModel;
   if (extra.tier && BOTS[botId]?.tiers[extra.tier]) {
     state.tier = extra.tier;
+    state.tierLabel = BOTS[botId].tiers[extra.tier].label;
   }
-  if (state.status === STATUS.UNKNOWN) {
+  if (state.status === STATUS.UNKNOWN && state.isLoggedIn) {
     state.status = STATUS.AVAILABLE;
   }
 
@@ -523,23 +458,23 @@ export async function updateBotHeartbeat(botId, extra = {}) {
 }
 
 /**
- * Simulate a rate limit for testing
- */
-export async function simulateLimit(botId, durationMinutes = 15) {
-  const resetsAt = Date.now() + durationMinutes * 60 * 1000;
-  return recordLimitDetected(botId, {
-    resetsAt,
-    reason: `Simulated limit for testing (${durationMinutes}m cooldown)`,
-    model: BOTS[botId]?.defaultModel
-  });
-}
-
-/**
  * History event logging (limited to last 100 items)
  */
 async function logHistoryEvent(event) {
   try {
-    let history = await storageAdapter.get(STORAGE_KEYS.HISTORY) || [];
+    let history = (await storageAdapter.get(STORAGE_KEYS.HISTORY)) || [];
+    // Avoid spamming duplicate sync logs within 30s for the same bot
+    if (
+      event.type === 'auto_fetch_sync' &&
+      history.length > 0 &&
+      history[0].type === 'auto_fetch_sync' &&
+      history[0].botId === event.botId &&
+      event.timestamp - history[0].timestamp < 30000 &&
+      history[0].usedPercent === event.usedPercent &&
+      history[0].tokensUsed === event.tokensUsed
+    ) {
+      return;
+    }
     history.unshift(event);
     if (history.length > 100) history = history.slice(0, 100);
     await storageAdapter.set(STORAGE_KEYS.HISTORY, history);
@@ -548,16 +483,10 @@ async function logHistoryEvent(event) {
   }
 }
 
-/**
- * Get history events
- */
 export async function getHistoryEvents() {
   return (await storageAdapter.get(STORAGE_KEYS.HISTORY)) || [];
 }
 
-/**
- * Reset all extension data
- */
 export async function clearAllData() {
   await storageAdapter.set(STORAGE_KEYS.BOTS_STATE, {});
   await storageAdapter.set(STORAGE_KEYS.HISTORY, []);

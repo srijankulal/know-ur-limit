@@ -1,15 +1,14 @@
 /**
- * AI Usage Limits Hub - Popup Controller
- * Renders real-time rate limits, live auto-fetched browser session quotas,
- * countdown timers, and sync controls.
+ * Know Ur Limit - Popup Controller
+ * Displays real usage limits, quota windows, total tokens used, and remaining tokens
+ * fetched directly from Claude, ChatGPT, Google Gemini, and DeepSeek.
  */
 
 import { BOTS, STATUS } from '../shared/constants.js';
-import { getAllBotStates, clearLimit, simulateLimit, updateBotCustomLimit } from '../shared/storage.js';
+import { getAllBotStates, clearLimit } from '../shared/storage.js';
 
 let currentStates = {};
 
-// Format remaining milliseconds to "01h 24m 12s"
 function formatCountdown(ms) {
   if (ms <= 0) return '00:00';
   const totalSecs = Math.floor(ms / 1000);
@@ -24,9 +23,8 @@ function formatCountdown(ms) {
   return `${pad(minutes)}m ${pad(seconds)}s`;
 }
 
-// Format timestamp into human-readable relative string
 function formatRelativeTime(ts) {
-  if (!ts) return 'Just now';
+  if (!ts) return 'Not synced';
   const diffSecs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
   if (diffSecs < 60) return 'Just now';
   const diffMins = Math.floor(diffSecs / 60);
@@ -35,168 +33,199 @@ function formatRelativeTime(ts) {
   return `${diffHours}h ago`;
 }
 
-// Render entire dashboard
+function formatTokens(num) {
+  if (typeof num !== 'number' || isNaN(num)) return '--';
+  if (num >= 1000000) return `${(num / 1000000).toFixed(2).replace(/\.00$/, '')}M`;
+  if (num >= 10000) return `${(num / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  return num.toLocaleString();
+}
+
 async function renderDashboard() {
   currentStates = await getAllBotStates();
   const botsGrid = document.getElementById('botsGrid');
   botsGrid.innerHTML = '';
 
-  let activeCount = 0;
+  let syncedBotsCount = 0;
   let limitedCount = 0;
   let loginNeededCount = 0;
-  let totalUsedCount = 0;
-  let totalPendingCount = 0;
+  let totalTokensUsed = 0;
+  let totalTokensRemaining = 0;
+  let anyTokenTelemetry = false;
   const loginNeededBots = [];
 
   for (const [botId, botDef] of Object.entries(BOTS)) {
     const state = currentStates[botId] || {};
-    const prompts = state.prompts || [];
-    const max = state.maxPrompts || 80;
+    const isLoggedIn = state.isLoggedIn === true && state.fetchStatus !== 'login_required';
 
-    const isLoggedIn = state.isLoggedIn !== false && state.fetchStatus !== 'login_required';
     if (!isLoggedIn) {
       loginNeededCount++;
       loginNeededBots.push(botDef.name);
+    } else {
+      syncedBotsCount++;
     }
 
-    // Use exact percent from browser session API if auto-fetched, otherwise calculated
-    const usedPct = typeof state.usedPercent === 'number'
-      ? Math.min(100, Math.max(0, state.usedPercent))
-      : Math.min(100, Math.round((prompts.length / max) * 100));
+    const hasPct = typeof state.usedPercent === 'number' && !isNaN(state.usedPercent);
+    const usedPct = hasPct ? Math.min(100, Math.max(0, state.usedPercent)) : null;
+    const remPct = hasPct ? Math.max(0, Number((100 - usedPct).toFixed(1))) : null;
 
-    const usedCount = typeof state.usedCount === 'number'
-      ? state.usedCount
-      : (typeof state.usedPercent === 'number'
-        ? Math.round((usedPct / 100) * max)
-        : prompts.length);
+    const hasTokens = typeof state.tokensUsed === 'number' && !isNaN(state.tokensUsed);
+    const tokensUsed = hasTokens ? state.tokensUsed : null;
+    const tokenLimit = typeof state.tokenLimit === 'number' ? state.tokenLimit : botDef.defaultContextTokens;
+    const tokensRemaining = typeof state.tokensRemaining === 'number'
+      ? state.tokensRemaining
+      : (hasTokens && tokenLimit ? Math.max(0, tokenLimit - tokensUsed) : null);
 
-    const pendingCount = typeof state.pendingCount === 'number'
-      ? state.pendingCount
-      : Math.max(0, max - usedCount);
-
-    const pendingPct = typeof state.pendingPercent === 'number'
-      ? state.pendingPercent
-      : Math.max(0, 100 - usedPct);
+    if (isLoggedIn && hasTokens) {
+      anyTokenTelemetry = true;
+      totalTokensUsed += tokensUsed;
+      if (typeof tokensRemaining === 'number') {
+        totalTokensRemaining += tokensRemaining;
+      }
+    }
 
     const now = Date.now();
-    const isLimited = state.status === STATUS.LIMITED || (state.resetsAt && state.resetsAt > now && usedPct >= 95);
-
-    if (isLoggedIn) {
-      totalUsedCount += usedCount;
-      totalPendingCount += pendingCount;
-      if (isLimited) limitedCount++;
-      else activeCount++;
-    }
+    const isLimited = state.status === STATUS.LIMITED || (usedPct !== null && usedPct >= 100);
+    if (isLoggedIn && isLimited) limitedCount++;
 
     const card = document.createElement('div');
     card.className = `bot-card ${!isLoggedIn ? 'login-needed' : isLimited ? 'limited' : state.status === STATUS.APPROACHING ? 'approaching' : ''}`;
     card.dataset.botId = botId;
 
-    // Status chip text and class
+    // Status chip
     let chipText = 'Ready';
     let chipClass = 'available';
     if (!isLoggedIn) {
       chipText = 'Login Needed';
       chipClass = 'login-needed';
     } else if (isLimited) {
-      chipText = 'Limited';
+      chipText = 'Limit Reached';
       chipClass = 'limited';
-    } else if (state.status === STATUS.APPROACHING || usedPct >= 80) {
+    } else if (state.status === STATUS.APPROACHING || (usedPct !== null && usedPct >= 80)) {
       chipText = `${usedPct}% Used`;
+      chipClass = 'approaching';
+    } else if (usedPct !== null) {
+      chipText = `${usedPct}% Used`;
+      chipClass = 'available';
+    } else if (state.fetchStatus === 'tab_required') {
+      chipText = 'Needs Sync';
       chipClass = 'approaching';
     }
 
-    // Gradient bar color
     let meterColor = botDef.color;
     if (!isLoggedIn) meterColor = '#94a3b8';
     else if (isLimited) meterColor = '#ef4444';
     else if (state.status === STATUS.APPROACHING) meterColor = '#f59e0b';
 
-    // Tier badge label
-    const tierDef = botDef.tiers[state.tier] || Object.values(botDef.tiers)[0];
-    const tierLabel = tierDef?.label || (state.tier ? state.tier.toUpperCase() : 'STANDARD');
+    const tierLabel = state.tierLabel || botDef.tiers[state.tier]?.label || botDef.name;
+    const modelLabel = state.activeModel || botDef.defaultModel;
 
-    // Sync Telemetry Badge
+    // Sync badge
     let syncBadgeHtml = '';
     if (!isLoggedIn) {
-      syncBadgeHtml = `<span class="sync-badge login-required" title="Log in to ${botDef.name} to track actual usage limits">🔒 Login Needed</span>`;
-    } else if (state.fetchedFromBrowser && state.lastFetchedAt) {
-      const relTime = formatRelativeTime(state.lastFetchedAt);
-      syncBadgeHtml = `<span class="sync-badge synced" title="Usage quota auto-fetched from live browser session">⚡ Live (${relTime})</span>`;
-    } else if (state.fetchStatus === 'tab_required') {
-      syncBadgeHtml = `<span class="sync-badge tab-required" title="Click Sync or Open Chat to connect live telemetry">🌐 Tab Sync</span>`;
+      syncBadgeHtml = `<span class="sync-badge login-required">🔒 Not Logged In</span>`;
+    } else if (state.hasRealTelemetry && state.lastFetchedAt) {
+      syncBadgeHtml = `<span class="sync-badge synced">⚡ Live (${formatRelativeTime(state.lastFetchedAt)})</span>`;
     } else {
-      syncBadgeHtml = `<span class="sync-badge synced" title="Provider session active">⚡ Connected</span>`;
+      syncBadgeHtml = `<span class="sync-badge tab-required">🌐 Click Sync to Fetch</span>`;
     }
 
-    // Account email chip if detected
-    let accountEmailHtml = '';
-    if (isLoggedIn && state.accountEmail) {
-      accountEmailHtml = `<span class="account-email" title="Signed in as ${state.accountEmail}">👤 ${state.accountEmail}</span>`;
+    const accountEmailHtml = isLoggedIn && state.accountEmail
+      ? `<span class="account-email" title="${state.accountEmail}">👤 ${state.accountEmail}</span>`
+      : '';
+
+    // Real rate-limit windows breakdown (e.g. Claude 5h/7d, ChatGPT primary/weekly, DeepSeek quotas)
+    let windowsHtml = '';
+    if (isLoggedIn && Array.isArray(state.windows) && state.windows.length > 0) {
+      const winItems = state.windows.map(w => {
+        const wReset = w.resetsAt && w.resetsAt > now
+          ? ` • Resets ${formatCountdown(w.resetsAt - now)}`
+          : '';
+        const countPart = typeof w.used === 'number' && typeof w.limit === 'number'
+          ? ` (${w.used}/${w.limit})`
+          : '';
+        return `<div class="quota-win-row">
+          <span>${w.label}:</span>
+          <strong>${w.usedPercent}% used • ${w.remainingPercent}% left${countPart}${wReset}</strong>
+        </div>`;
+      }).join('');
+      windowsHtml = `<div class="extra-windows">${winItems}</div>`;
     }
 
-    // Quota windows info if available (e.g. Claude 5h & 7d quotas)
-    let extraWindowsHtml = '';
-    if (botId === 'claude' && state.quotaWindows?.five_hour && isLoggedIn) {
-      const fiveH = state.quotaWindows.five_hour;
-      const sevenD = state.quotaWindows.seven_day;
-      const fPct = Math.round((fiveH.utilization <= 1 && fiveH.utilization > 0 ? fiveH.utilization * 100 : fiveH.utilization) || 0);
-      const sPct = sevenD ? Math.round((sevenD.utilization <= 1 && sevenD.utilization > 0 ? sevenD.utilization * 100 : sevenD.utilization) || 0) : null;
-      extraWindowsHtml = `
-        <div class="extra-windows">
-          <span>5h Window: <strong>${fPct}%</strong></span>
-          ${sPct !== null ? `<span>Weekly: <strong>${sPct}%</strong></span>` : ''}
-        </div>
-      `;
-    }
-
-    // Not logged in callout vs normal usage stats
+    // Body content
     let bodyContentHtml = '';
     if (!isLoggedIn) {
       bodyContentHtml = `
         <div class="login-callout">
           <span class="callout-icon">🔒</span>
           <div class="callout-text">
-            <span>Log in to your ${botDef.name} account to fetch actual rate limits, message caps, and reset times.</span>
+            <span>Sign in to <strong>${botDef.name}</strong> in your browser to fetch real usage limits and remaining tokens.</span>
+          </div>
+        </div>
+      `;
+    } else if (!state.hasRealTelemetry && usedPct === null && tokensUsed === null) {
+      bodyContentHtml = `
+        <div class="login-callout" style="border-color: rgba(56, 189, 248, 0.35);">
+          <span class="callout-icon">⚡</span>
+          <div class="callout-text">
+            <span>Session detected for <strong>${botDef.name}</strong>. Click <strong>Sync Live Usage</strong> below to fetch real quota & remaining tokens.</span>
           </div>
         </div>
       `;
     } else {
+      // Primary display values for TOTAL USAGE and REMAINING TOKENS / QUOTA
+      const usedPrimary = hasTokens
+        ? `${formatTokens(tokensUsed)} <span class="val-denom">tokens</span>`
+        : `${usedPct ?? 0}% <span class="val-denom">used</span>`;
+
+      const usedSub = (hasTokens && typeof state.inputTokens === 'number' && typeof state.outputTokens === 'number')
+        ? `In: ${formatTokens(state.inputTokens)} • Out: ${formatTokens(state.outputTokens)}${usedPct !== null ? ` • ${usedPct}%` : ''}`
+        : (usedPct !== null ? `${usedPct}% of quota window` : 'Live session usage');
+
+      const remPrimary = typeof tokensRemaining === 'number'
+        ? `<strong style="color: #34d399;">${formatTokens(tokensRemaining)}</strong> <span class="val-denom">tok left</span>`
+        : `<strong style="color: #34d399;">${remPct ?? 100}%</strong> <span class="val-denom">remaining</span>`;
+
+      const remSub = (typeof tokensRemaining === 'number' && tokenLimit)
+        ? `${remPct !== null ? `${remPct}% left • ` : ''}Limit: ${formatTokens(tokenLimit)} tok`
+        : `${remPct ?? 100}% quota capacity remaining`;
+
+      const barWidth = isLimited ? 100 : (usedPct ?? 0);
+
       bodyContentHtml = `
-        <!-- Dual Quota Display: Used vs Pending -->
         <div class="usage-dual-badges">
-          <div class="usage-badge used" title="Prompts consumed in current window">
+          <div class="usage-badge used" title="Real usage & tokens consumed">
             <div class="usage-badge-label">
               <span class="badge-dot dot-used"></span>
-              <span>USED</span>
+              <span>TOTAL USAGE</span>
             </div>
             <div class="usage-badge-val">
-              <strong>${usedCount}</strong> <span class="val-denom">/ ${max} msgs</span>
+              <strong>${usedPrimary}</strong>
             </div>
-            <div class="usage-badge-sub">${usedPct}% of limit</div>
+            <div class="usage-badge-sub">${usedSub}</div>
           </div>
 
-          <div class="usage-badge pending" title="Prompts remaining before rate limit">
+          <div class="usage-badge pending" title="Real remaining tokens & quota">
             <div class="usage-badge-label">
               <span class="badge-dot dot-pending"></span>
-              <span>PENDING</span>
+              <span>REMAINING</span>
             </div>
             <div class="usage-badge-val">
-              <strong style="color: #34d399;">${pendingCount}</strong> <span class="val-denom">msgs left</span>
+              ${remPrimary}
             </div>
-            <div class="usage-badge-sub">${pendingPct}% remaining</div>
+            <div class="usage-badge-sub">${remSub}</div>
           </div>
         </div>
 
         <div class="card-meter-section">
           <div class="meter-track">
-            <div class="meter-fill" style="width: ${isLimited ? 100 : usedPct}%; background: ${meterColor};"></div>
+            <div class="meter-fill" style="width: ${barWidth}%; background: ${meterColor};"></div>
           </div>
           <div class="meter-labels">
-            <span>Used: ${usedCount} (${usedPct}%)</span>
-            <span>Pending: ${isLimited ? '0 (Cap Hit)' : `${pendingCount} (${pendingPct}%)`}</span>
+            <span>Used: ${usedPct !== null ? `${usedPct}%` : '--'}${hasTokens ? ` (${formatTokens(tokensUsed)} tok)` : ''}</span>
+            <span>Remaining: ${isLimited ? '0% (Limit Hit)' : `${remPct !== null ? `${remPct}%` : '--'}${typeof tokensRemaining === 'number' ? ` (${formatTokens(tokensRemaining)} tok)` : ''}`}</span>
           </div>
-          ${extraWindowsHtml}
+          ${windowsHtml}
+          ${state.tokenSource ? `<div class="token-source-line">📊 Source: ${state.tokenSource} (${modelLabel})</div>` : ''}
         </div>
 
         <div class="countdown-box ${isLimited ? 'urgent' : ''}" id="countdown-box-${botId}">
@@ -204,37 +233,31 @@ async function renderDashboard() {
             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
             </svg>
-            <span class="cd-title">${isLimited ? 'Resets in:' : 'Window slot resets:'}</span>
+            <span class="cd-title">${isLimited ? 'Cooldown resets in:' : 'Window resets in:'}</span>
           </span>
           <span class="countdown-value" id="cd-val-${botId}">--:--</span>
         </div>
       `;
     }
 
-    // Action buttons: If not logged in, show primary "Log In" button
+    // Action buttons
     let actionsHtml = '';
     if (!isLoggedIn) {
       actionsHtml = `
-        <button class="btn-login" data-login-bot="${botId}" title="Log in to ${botDef.name}">
-          🔑 Log In
+        <button class="btn-login" data-login-bot="${botId}">
+          🔑 Log In to ${botDef.shortName}
         </button>
-        <button class="btn-open" data-open-bot="${botId}">
-          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/>
-          </svg>
-          Open Chat
-        </button>
-        <button class="btn-config" data-config-bot="${botId}" title="Customize limit for ${botDef.name}">
-          Limit
+        <button class="btn-sync" data-sync-bot="${botId}" title="Try syncing ${botDef.name} session">
+          ⚡ Sync
         </button>
       `;
     } else {
       actionsHtml = `
-        <button class="btn-sync" data-sync-bot="${botId}" title="Sync ${botDef.name} live limit">
+        <button class="btn-sync" data-sync-bot="${botId}" title="Fetch live usage & tokens from ${botDef.name}">
           <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
           </svg>
-          Sync
+          Sync Live Usage
         </button>
         <button class="btn-open" data-open-bot="${botId}">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
@@ -242,10 +265,7 @@ async function renderDashboard() {
           </svg>
           Open Chat
         </button>
-        <button class="btn-config" data-config-bot="${botId}" title="Customize limit for ${botDef.name}">
-          Limit
-        </button>
-        ${isLimited ? `<button class="btn-clear" data-clear-bot="${botId}" title="Manually clear limit">Clear</button>` : ''}
+        ${isLimited ? `<button class="btn-clear" data-clear-bot="${botId}">Clear</button>` : ''}
       `;
     }
 
@@ -260,7 +280,7 @@ async function renderDashboard() {
               <span class="bot-name">${botDef.name}</span>
               <span class="tier-badge">${tierLabel}</span>
             </div>
-            <div style="display: flex; align-items: center; gap: 4px; margin-top: 2px;">
+            <div style="display: flex; align-items: center; gap: 4px; margin-top: 2px; flex-wrap: wrap;">
               ${syncBadgeHtml}
               ${accountEmailHtml}
             </div>
@@ -282,21 +302,27 @@ async function renderDashboard() {
     botsGrid.appendChild(card);
   }
 
-  // Update Overview stats
+  // Update Overview stats with real tokens
   const statUsedEl = document.getElementById('statTotalUsed');
-  if (statUsedEl) statUsedEl.textContent = `${totalUsedCount} msgs`;
+  if (statUsedEl) {
+    statUsedEl.textContent = anyTokenTelemetry ? `${formatTokens(totalTokensUsed)} tok` : '0 tok';
+  }
   const statPendingEl = document.getElementById('statTotalPending');
-  if (statPendingEl) statPendingEl.textContent = `${totalPendingCount} msgs`;
+  if (statPendingEl) {
+    statPendingEl.textContent = anyTokenTelemetry ? `${formatTokens(totalTokensRemaining)} tok` : '--';
+  }
   const statLimitedEl = document.getElementById('statLimitedBots');
-  if (statLimitedEl) statLimitedEl.textContent = limitedCount;
+  if (statLimitedEl) {
+    statLimitedEl.textContent = limitedCount > 0 ? `${limitedCount} Limited` : `${syncedBotsCount} / ${Object.keys(BOTS).length}`;
+  }
 
-  // Header status & global banner
+  // Header status & login banner
   const headerStatusText = document.getElementById('headerStatusText');
   const loginBanner = document.getElementById('loginWarningBanner');
 
   if (loginNeededCount > 0) {
     if (headerStatusText) {
-      headerStatusText.textContent = `${loginNeededCount} Bot${loginNeededCount > 1 ? 's' : ''} Need Login`;
+      headerStatusText.textContent = `${syncedBotsCount} Connected • ${loginNeededCount} Need Login`;
       headerStatusText.style.color = '#f59e0b';
     }
     if (loginBanner) {
@@ -305,8 +331,8 @@ async function renderDashboard() {
         <div class="login-banner-content">
           <span class="banner-icon">🔒</span>
           <div class="banner-msg">
-            <strong>Login required for live limits:</strong>
-            <span>Log in to ${loginNeededBots.join(', ')} in your browser to fetch real quotas.</span>
+            <strong>Sign in required for ${loginNeededBots.join(', ')}:</strong>
+            <span>Log in to fetch real usage quotas and remaining tokens from your account.</span>
           </div>
         </div>
       `;
@@ -315,10 +341,10 @@ async function renderDashboard() {
     if (loginBanner) loginBanner.classList.add('hidden');
     if (headerStatusText) {
       if (limitedCount > 0) {
-        headerStatusText.textContent = `${limitedCount} Bot${limitedCount > 1 ? 's' : ''} Cooling Down`;
+        headerStatusText.textContent = `${limitedCount} Bot${limitedCount > 1 ? 's' : ''} at Usage Limit`;
         headerStatusText.style.color = '#f87171';
       } else {
-        headerStatusText.textContent = 'Auto-Sync Active • Live Browser Quotas';
+        headerStatusText.textContent = 'Live Provider Usage & Token Telemetry';
         headerStatusText.style.color = '#34d399';
       }
     }
@@ -328,7 +354,6 @@ async function renderDashboard() {
   updateLiveTimers();
 }
 
-// Live timer tick without refreshing full DOM
 function updateLiveTimers() {
   const now = Date.now();
 
@@ -339,33 +364,20 @@ function updateLiveTimers() {
     const valEl = document.getElementById(`cd-val-${botId}`);
     if (!valEl) continue;
 
-    const isLimited = state.status === STATUS.LIMITED || (state.resetsAt && state.resetsAt > now && (state.usedPercent || 0) >= 95);
-
-    if (isLimited && state.resetsAt) {
+    if (state.resetsAt && state.resetsAt > now) {
       const remainingMs = Math.max(0, state.resetsAt - now);
       valEl.textContent = formatCountdown(remainingMs);
       if (remainingMs <= 0) {
         renderDashboard();
         return;
       }
-    } else if (state.resetsAt && state.resetsAt > now) {
-      // Future reset point detected from API (e.g. 5h window)
-      const remainingMs = Math.max(0, state.resetsAt - now);
-      valEl.textContent = formatCountdown(remainingMs);
-    } else if (state.prompts && state.prompts.length > 0) {
-      const windowMs = (state.windowMinutes || 180) * 60 * 1000;
-      const oldestTs = state.prompts[0].timestamp;
-      const remainingMs = Math.max(0, (oldestTs + windowMs) - now);
-      valEl.textContent = formatCountdown(remainingMs);
     } else {
-      valEl.textContent = 'Ready';
+      valEl.textContent = 'No active cooldown';
     }
   }
 }
 
-// Bind Action Handlers for cards
 function bindCardActions() {
-  // Log In Button
   document.querySelectorAll('[data-login-bot]').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       const botId = e.currentTarget.dataset.loginBot;
@@ -380,11 +392,11 @@ function bindCardActions() {
     });
   });
 
-  // Individual Bot Sync Button
   document.querySelectorAll('[data-sync-bot]').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       const botId = e.currentTarget.dataset.syncBot;
       btn.classList.add('spinning');
+      btn.disabled = true;
       try {
         if (typeof chrome !== 'undefined' && chrome.runtime) {
           await new Promise((resolve) => {
@@ -399,7 +411,6 @@ function bindCardActions() {
     });
   });
 
-  // Open Chat Tab
   document.querySelectorAll('[data-open-bot]').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       const botId = e.currentTarget.dataset.openBot;
@@ -425,7 +436,6 @@ function bindCardActions() {
     });
   });
 
-  // Clear Limit
   document.querySelectorAll('[data-clear-bot]').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       const botId = e.currentTarget.dataset.clearBot;
@@ -433,120 +443,24 @@ function bindCardActions() {
       await renderDashboard();
     });
   });
-
-  // Customize Limit
-  document.querySelectorAll('[data-config-bot]').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
-      const botId = e.currentTarget.dataset.configBot;
-      openCustomModal(botId);
-    });
-  });
 }
 
-let currentEditingBotId = null;
-
-function openCustomModal(botId) {
-  currentEditingBotId = botId;
-  const botDef = BOTS[botId];
-  const state = currentStates[botId] || {};
-  if (!botDef) return;
-
-  const modal = document.getElementById('customModal');
-  const title = document.getElementById('customModalTitle');
-  const tierSelect = document.getElementById('customTierSelect');
-  const maxInput = document.getElementById('customMaxInput');
-  const winInput = document.getElementById('customWindowInput');
-
-  title.textContent = `Customize ${botDef.name} Limit`;
-  maxInput.value = state.maxPrompts || 80;
-  winInput.value = state.windowMinutes || 180;
-
-  // Populate tiers
-  tierSelect.innerHTML = '';
-  for (const [tKey, tDef] of Object.entries(botDef.tiers)) {
-    const opt = document.createElement('option');
-    opt.value = tKey;
-    opt.textContent = `${tDef.label} (Default: ${tDef.defaultMax} msgs / ${tDef.windowMinutes}m)`;
-    if (tKey === state.tier) opt.selected = true;
-    tierSelect.appendChild(opt);
-  }
-
-  tierSelect.onchange = () => {
-    const selectedTier = tierSelect.value;
-    const tDef = botDef.tiers[selectedTier];
-    if (tDef) {
-      maxInput.value = tDef.defaultMax;
-      winInput.value = tDef.windowMinutes;
-    }
-  };
-
-  modal.classList.remove('hidden');
-}
-
-function setupCustomLimitModal() {
-  const modal = document.getElementById('customModal');
-  const cancelBtn = document.getElementById('cancelCustomBtn');
-  const saveBtn = document.getElementById('saveCustomBtn');
-  const tierSelect = document.getElementById('customTierSelect');
-  const maxInput = document.getElementById('customMaxInput');
-  const winInput = document.getElementById('customWindowInput');
-
-  cancelBtn.addEventListener('click', () => {
-    modal.classList.add('hidden');
-  });
-
-  saveBtn.addEventListener('click', async () => {
-    if (!currentEditingBotId) return;
-    const maxPrompts = parseInt(maxInput.value, 10) || 50;
-    const windowMinutes = parseInt(winInput.value, 10) || 180;
-    const tier = tierSelect.value;
-
-    await updateBotCustomLimit(currentEditingBotId, { maxPrompts, windowMinutes, tier });
-    modal.classList.add('hidden');
-    await renderDashboard();
-  });
-}
-
-// Simulation Modal Setup
-function setupSimulationModal() {
-  const simModal = document.getElementById('simModal');
-  const testBtn = document.getElementById('testSimulationBtn');
-  const cancelBtn = document.getElementById('cancelSimBtn');
-  const applyBtn = document.getElementById('applySimBtn');
-  const botSelect = document.getElementById('simBotSelect');
-  const minutesInput = document.getElementById('simMinutesInput');
-
-  testBtn.addEventListener('click', () => {
-    simModal.classList.remove('hidden');
-  });
-
-  cancelBtn.addEventListener('click', () => {
-    simModal.classList.add('hidden');
-  });
-
-  applyBtn.addEventListener('click', async () => {
-    const botId = botSelect.value;
-    const minutes = parseInt(minutesInput.value, 10) || 10;
-    simModal.classList.add('hidden');
-    await simulateLimit(botId, minutes);
-    await renderDashboard();
-  });
-}
-
-// Trigger browser synchronization
-async function triggerSyncFromBrowser() {
+async function triggerSyncFromBrowser(allowTempTab = false) {
   const refreshBtn = document.getElementById('refreshBtn');
   if (refreshBtn) refreshBtn.classList.add('spinning');
 
   try {
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
       await new Promise((resolve) => {
-        chrome.runtime.sendMessage({ action: 'SYNC_USAGE_LIMITS' }, (response) => {
-          if (response?.states) {
-            currentStates = response.states;
+        chrome.runtime.sendMessage(
+          { action: 'SYNC_USAGE_LIMITS', data: { allowTempTab } },
+          (response) => {
+            if (response?.states) {
+              currentStates = response.states;
+            }
+            resolve();
           }
-          resolve();
-        });
+        );
       });
     }
   } catch (err) {
@@ -559,21 +473,20 @@ async function triggerSyncFromBrowser() {
   }
 }
 
-// Initialize Popup
 document.addEventListener('DOMContentLoaded', async () => {
-  // 1. Initial quick render from storage
   await renderDashboard();
 
-  // 2. Automatically trigger live browser session sync on popup open
-  triggerSyncFromBrowser();
+  // Trigger live sync from open tabs & background sessions on open
+  triggerSyncFromBrowser(false);
 
-  // 3. 1-second ticker for live countdowns
   setInterval(updateLiveTimers, 1000);
 
-  // 4. Manual Refresh Button triggers live browser sync
-  document.getElementById('refreshBtn').addEventListener('click', triggerSyncFromBrowser);
+  document.getElementById('refreshBtn').addEventListener('click', () => triggerSyncFromBrowser(true));
+  const syncAllFooterBtn = document.getElementById('syncAllFooterBtn');
+  if (syncAllFooterBtn) {
+    syncAllFooterBtn.addEventListener('click', () => triggerSyncFromBrowser(true));
+  }
 
-  // 5. Options Button
   document.getElementById('optionsBtn').addEventListener('click', () => {
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.openOptionsPage) {
       chrome.runtime.openOptionsPage();
@@ -582,7 +495,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // 6. Listen for state updates broadcasted from background worker
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((message) => {
       if (message.action === 'STATE_UPDATED' && message.data) {
@@ -591,7 +503,4 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
   }
-
-  setupSimulationModal();
-  setupCustomLimitModal();
 });
